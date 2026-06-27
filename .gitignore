@@ -1,0 +1,29 @@
+# Environment
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# ML
+ml/models/*.pkl
+mlruns/
+
+# IDE
+.vscode/
+.idea/
+*.DS_Store
+
+# Docker
+*.log

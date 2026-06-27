@@ -1,0 +1,1 @@
+-- Initial schema migration — creates users, ticks (TimescaleDB hypertable), and predictions tables
