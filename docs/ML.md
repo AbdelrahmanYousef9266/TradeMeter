@@ -157,3 +157,70 @@ Every 100 bars, `snapshot_all()` is called:
 - Registered under run names: `trademeter_{model_name}_{user_id}`
 
 **Rollback:** `mlflow.artifacts.download_artifacts(run_id=...)` retrieves any prior snapshot. The pipeline can hot-swap a model instance without restarting the backend.
+
+---
+
+## Model Level System
+
+Every model instance earns XP as it learns from live bars. XP accumulates toward levels (1–100) that unlock settings and increase blend weight in the personal models. XP and level are tracked **per model per user** — each user's copy of the 8 shared models levels up independently based on that user's own data stream.
+
+### XP Sources (awarded per bar, per model)
+
+| Event | XP |
+|-------|----|
+| Bar learned from (every bar) | +1 XP |
+| Correct direction prediction | +10 XP |
+| P&L improvement on that bar | +5 XP |
+| Consecutive correct signal (× current streak count) | +3 XP |
+| Wrong prediction | −3 XP |
+
+**XP floor:** XP never goes below 0. A Rookie model cannot accumulate negative XP.
+
+**Streak bonus:** The streak counter increments by 1 for each consecutive correct signal. A single wrong prediction resets the streak to 0. A 5-streak bar earns +15 XP from the streak bonus alone.
+
+### Rank Tiers
+
+| Level | Rank | Color |
+|-------|------|-------|
+| 1–19 | Rookie | Gray |
+| 20–39 | Apprentice | Blue |
+| 40–59 | Pro | Teal |
+| 60–79 | Elite | Purple |
+| 80–99 | Expert | Amber |
+| 100 | Master | Coral |
+
+### XP to Next Level Formula
+
+| Level range | XP required per level |
+|-------------|-----------------------|
+| 1–20 | 300 XP |
+| 21–50 | 500 XP |
+| 51–80 | 800 XP |
+| 81–99 | 1 200 XP |
+| 100 | Final tier — no next level |
+
+### Unlock Progression
+
+| Rank reached | What unlocks |
+|-------------|-------------|
+| Apprentice (Lv 20) | Confidence threshold slider |
+| Pro (Lv 40) | Signal mode presets (Aggressive / Balanced / Conservative) |
+| Elite (Lv 60) | Blend weight visible and adjustable in personal models |
+| Expert (Lv 80) | Aggressive settings (wide targets, low confidence floor) |
+| Master (Lv 100) | All settings fully unlocked · max blend weight |
+
+### Effect on Personal Model Blend Weight
+
+When models 1–8 contribute to the personal hybrid (models 9 and 10), their base blend weight is their rolling 50-bar accuracy (normalized). Rank multipliers are applied on top:
+
+| Rank | Blend weight multiplier |
+|------|------------------------|
+| Rookie / Apprentice / Pro | 1.0× (base accuracy) |
+| Elite (Lv 60+) | 1.5× |
+| Master (Lv 100) | 2.0× |
+
+After multipliers are applied, weights are renormalized to sum to 1.0. A Master-ranked Momentum model will dominate the personal blend if it is also accurate. User manual overrides clamp and renormalize after the rank multipliers.
+
+### Dashboard Notifications
+
+When a model levels up, `pipeline.py` publishes a `level_up` event to the Redis pub/sub channel `live:{user_id}`. The WebSocket broadcaster forwards it to the browser, where a toast notification plays a level-up animation on the relevant model card.

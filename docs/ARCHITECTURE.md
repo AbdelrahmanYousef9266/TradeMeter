@@ -192,6 +192,12 @@ Redis Streams provide a durable, ordered, consumer-group-aware message log. The 
 
 Tick data is purely append-only with heavy range-query access patterns ("last 500 bars for user X"). TimescaleDB hypertables partition the ticks table by time automatically, delivering ~10× faster range queries than vanilla Postgres and native time-series compression. The `predictions` table also benefits from the same time-indexed query patterns.
 
+**TimescaleDB tables:**
+- `ticks` — OHLCV bar closes, hypertable partitioned by time (per user per symbol)
+- `predictions` — per-bar model signals with actual outcome filled on next bar close
+- `model_settings` — JSONB behavior config per user per model
+- `model_levels` — XP, level, streak, and bars learned (per user per model); updated after every bar's `learn_all()` call
+
 ### Why MLflow?
 
 Snapshots every 100 bars let us roll back any single model independently if a personality drifts badly. MLflow tags each snapshot with `user_id`, `model_name`, `bar_count`, and `rolling_accuracy`, making it possible to restore a specific user's specific model to a specific known-good state without affecting any other model or user.
@@ -202,4 +208,8 @@ NinjaTrader 8 is a local desktop application running on .NET 4.8 with no ability
 
 ### Multi-user data isolation
 
-Every row in `ticks`, `predictions`, and `model_settings` carries a `user_id` UUID foreign key. All queries are `WHERE user_id = $1`. Personal models 9 and 10 are instances of the same `personal.py` class, differentiated only by the `user_id` they are initialized with. Adding a third user creates Model 11 automatically with the same mechanism.
+Every row in `ticks`, `predictions`, `model_settings`, and `model_levels` carries a `user_id` UUID foreign key. All queries are `WHERE user_id = $1`. Personal models 9 and 10 are instances of the same `personal.py` class, differentiated only by the `user_id` they are initialized with. Adding a third user creates Model 11 automatically with the same mechanism.
+
+### Level system
+
+Each model instance tracks XP, level (1–100), streak, and bars learned from. These are stored in TimescaleDB in the `model_levels` table, scoped by `user_id + model_name`. Leveling up triggers a dashboard notification via Redis pub/sub (`live:{user_id}`) and progressively unlocks behavior settings. Higher-ranked models automatically receive more weight in the personal model ensemble — Elite+ models get a 1.5× weight multiplier, Master models get 2×. The XP floor is 0; a Rookie model cannot go negative. Streak resets to 0 on any wrong prediction and on drift-triggered model resets (the level itself is never reset).

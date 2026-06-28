@@ -1,1 +1,12 @@
-// Zustand global store — state: { user, ntConnected, currentBar, modelSignals (object keyed by model name), leaderboard (array sorted by P&L), settings }. Actions: setUser, setBar, updateModelSignal, updateLeaderboard, setNtConnected, setSettings
+// Zustand global store — state shape:
+// {
+//   user: { id, email, ntConnected },
+//   currentBar: { time, open, high, low, close, volume },
+//   modelSignals: { [modelName]: { signal, confidence, direction, target } },
+//   modelLevels: { [modelName]: { level, xp, streak, rank, xpProgressPct, unlockedSettings } },
+//   leaderboard: { pnl: [...], levels: [...] },
+//   levelUpQueue: [LevelUpEvent],   // notifications waiting to display
+//   settings: { instrument, barType, indicators }
+// }
+// Actions: setUser, setBar, updateModelSignal, updateModelLevel,
+//          updateLeaderboard, pushLevelUpNotification, dismissLevelUp, setSettings

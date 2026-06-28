@@ -52,3 +52,18 @@ CREATE INDEX IF NOT EXISTS idx_ticks_user_time
 
 CREATE INDEX IF NOT EXISTS idx_predictions_user_model_time
     ON predictions (user_id, model_name, time DESC);
+
+CREATE TABLE IF NOT EXISTS model_levels (
+    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    model_name    TEXT        NOT NULL,
+    level         INTEGER     NOT NULL DEFAULT 1,
+    xp            INTEGER     NOT NULL DEFAULT 0,
+    streak        INTEGER     NOT NULL DEFAULT 0,
+    bars_learned  INTEGER     NOT NULL DEFAULT 0,
+    last_level_up TIMESTAMPTZ,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, model_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_levels_user
+    ON model_levels (user_id);

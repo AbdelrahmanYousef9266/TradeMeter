@@ -129,6 +129,20 @@ Connect to `ws://localhost:8000/market/live` with the JWT cookie present. One me
 }
 ```
 
+Level-up events are pushed as separate messages when a model advances to a new level:
+
+```json
+{
+  "type": "level_up",
+  "model_name": "momentum",
+  "new_level": 40,
+  "new_rank": "Pro",
+  "unlocked": "Signal mode presets"
+}
+```
+
+The `unlocked` field is `null` if the level-up did not cross a rank boundary with a new unlock. The frontend uses this event to play a level-up animation on the relevant model card and push a toast notification.
+
 Drift events are pushed as separate messages:
 
 ```json
@@ -148,11 +162,13 @@ Drift events are pushed as separate messages:
 |---|---|---|---|
 | `GET` | `/api/v1/models` | JWT | List all 10 models with current status and today's P&L |
 | `GET` | `/api/v1/models/leaderboard` | JWT | All models ranked by today's P&L |
+| `GET` | `/api/v1/models/leaderboard/levels` | JWT | All models ranked by current level and XP |
 | `GET` | `/api/v1/models/{model_id}` | JWT | Single model detail: accuracy, current signal, settings |
-| `GET` | `/api/v1/models/{model_id}/settings` | JWT | Get model's current behavior settings |
-| `PUT` | `/api/v1/models/{model_id}/settings` | JWT | Update model behavior settings |
-| `POST` | `/api/v1/models/{model_id}/reset` | JWT | Reset model weights to defaults |
-| `GET` | `/api/v1/models/{model_id}/history` | JWT | Model accuracy history over time |
+| `GET` | `/api/v1/models/{model_id}/settings` | JWT | Get model's current behavior settings (filtered by rank unlocks) |
+| `PUT` | `/api/v1/models/{model_id}/settings` | JWT | Update model behavior settings (validated against rank unlock gates) |
+| `POST` | `/api/v1/models/{model_id}/reset` | JWT | Reset model weights to defaults (keeps level and XP) |
+| `GET` | `/api/v1/models/{model_id}/history` | JWT | Model accuracy and XP history over time |
+| `GET` | `/api/v1/models/{model_id}/level` | JWT | Current level, XP, streak, rank, and unlocked settings |
 
 **PUT /api/v1/models/{model_id}/settings request body example:**
 
