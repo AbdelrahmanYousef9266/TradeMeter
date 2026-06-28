@@ -2,39 +2,15 @@
 
 ## What It Does
 
-LiveDataFeedStrategy is a NinjaScript strategy that runs inside NinjaTrader 8. On every completed bar it serializes the OHLCV data plus your TradeMeter connection token into a single JSON line and sends it to the TradeMeter backend over a TCP socket on port 5000. The strategy handles reconnection automatically if the connection drops mid-session.
+LiveDataFeedStrategy is a NinjaScript strategy that runs inside NinjaTrader 8. On every completed bar it sends the OHLCV data plus your TradeMeter connection token to the TradeMeter backend over a TCP socket. Between bar closes, it also sends real-time tick updates so the dashboard price line stays live. The strategy runs on a background thread and handles reconnection automatically — NinjaTrader will never freeze or crash due to a lost connection.
+
+The strategy is **data-only**: it never places, modifies, or cancels any orders.
 
 ---
 
 ## Install Instructions
 
-1. **Open NinjaTrader 8**
-
-2. **Open NinjaScript Editor**
-   - Menu bar → Tools → Edit NinjaScript → Strategy
-
-3. **Import the strategy file**
-   - In the NinjaScript Editor, go to File → Open
-   - Navigate to and open `LiveDataFeedStrategy.cs` from this folder
-   - Alternatively: copy `LiveDataFeedStrategy.cs` into:
-     ```
-     C:\Users\<YourName>\Documents\NinjaTrader 8\bin\Custom\Strategies\
-     ```
-
-4. **Compile**
-   - Click the **Compile** button (F5) in the NinjaScript Editor
-   - Verify there are no compilation errors in the output panel
-
-5. **Add to Chart**
-   - Open a MES (Micro E-mini S&P 500) chart
-   - Right-click the chart → Strategies → Add Strategy
-   - Select **LiveDataFeedStrategy** from the list
-
-6. **Configure Parameters** (see table below)
-
-7. **Enable the Strategy**
-   - Click **OK** to add the strategy
-   - Toggle it to **Enabled** in the strategy control panel
+See [INSTALL.md](INSTALL.md) for the full step-by-step guide.
 
 ---
 
@@ -42,10 +18,35 @@ LiveDataFeedStrategy is a NinjaScript strategy that runs inside NinjaTrader 8. O
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `ConnectionToken` | string | *(empty)* | Your TradeMeter NT connection token (e.g. `TM-a3f9x2`). Get this from the TradeMeter **Connect** page after logging in. |
-| `Instrument` | string | `MES 09-24` | The futures instrument to stream. Must match the chart instrument. |
-| `SendDataToForm` | bool | `true` | Enable/disable sending data. Turn off without removing the strategy. |
-| `EnableLogging` | bool | `false` | Log each sent bar to the NinjaTrader output window. Useful for debugging. |
+| `ConnectionToken` | string | *(empty)* | Your TradeMeter NT connection token (e.g. `TM-a3f9x2`). Get this from the TradeMeter **Connect** page after logging in. Case-sensitive. |
+| `Instrument` | string | `MES 03-25` | Display name of the futures instrument. Included in every TCP message so the backend knows which contract you are trading. |
+| `TradeMeterHost` | string | `127.0.0.1` | IP address of the TradeMeter backend. Use `127.0.0.1` for local development. Use a Tailscale IP or server IP for remote access. |
+| `TradeMeterPort` | int | `5000` | TCP port the TradeMeter backend is listening on. Must match `NT_TCP_PORT` in your backend `.env`. |
+| `SendDataToForm` | bool | `true` | Master enable/disable switch. Turn off to pause streaming without removing the strategy from the chart. |
+| `EnableLogging` | bool | `true` | Log connection events and bar-close sends to the NinjaTrader output window. Disable during active trading sessions to reduce noise. |
+| `ReconnectDelaySeconds` | int | `5` | Seconds to wait before retrying after a connection failure. Range: 1–60. |
+
+---
+
+## TCP Message Format
+
+Every message is a single UTF-8 string terminated with `\n`:
+
+```
+TOKEN|TIMESTAMP|SYMBOL|OPEN|HIGH|LOW|CLOSE|VOLUME|BAR_TYPE\n
+```
+
+Example (bar close):
+```
+TM-a3f9x2|2025-03-15T14:32:00Z|MES 03-25|5841.25|5844.00|5840.50|5843.00|980|1min
+```
+
+Example (tick update):
+```
+TM-a3f9x2|2025-03-15T14:32:04Z|MES 03-25|5841.25|5844.00|5840.50|5842.75|1043|tick
+```
+
+Bar-close messages are sent once per bar (triggered by the first tick of the next bar). Tick messages are sent on every `MarketDataType.Last` event between bar closes.
 
 ---
 
@@ -55,13 +56,23 @@ LiveDataFeedStrategy is a NinjaScript strategy that runs inside NinjaTrader 8. O
 
 - Ensure you are using NinjaTrader 8.1 or later
 - Check the NinjaScript Editor output panel for the specific error line
-- Common issue: missing `using` directives — verify the top of the file includes `using System.Net.Sockets;`
+- Verify the file was copied to `Documents\NinjaTrader 8\bin\Custom\Strategies\` (not nested in a subfolder)
+- Common issue: line-ending differences if the file was edited on macOS/Linux — re-save with Windows CRLF line endings
 
 ### Data not appearing in TradeMeter dashboard
 
-1. Verify the TradeMeter backend is running (`uvicorn app.main:app --port 8000`)
-2. Check that `NT_TCP_PORT=5000` in your `.env` matches port 5000 (the default)
-3. Verify your `ConnectionToken` parameter is set correctly — it must exactly match the token shown on the Connect page (case-sensitive)
-4. Enable `EnableLogging=true` in the strategy parameters and watch the NinjaTrader output window — you should see a log line for each bar sent
-5. Check the backend log for: `token resolved to user_id=...` — if you see `token not found`, the token is wrong or has been rotated
-6. Windows Firewall may be blocking port 5000 — add an inbound rule to allow TCP on port 5000 from localhost
+1. Check the NinjaTrader output window for `TradeMeter: Connected to 127.0.0.1:5000` — if you see `Disconnected — retrying`, the backend is not reachable
+2. Verify the TradeMeter backend is running: `uvicorn app.main:app --port 8000` and confirm the TCP listener started on port 5000
+3. Check that `NT_TCP_PORT=5000` in your `.env` matches the `TradeMeterPort` parameter
+4. Verify `ConnectionToken` exactly matches the token on the TradeMeter Connect page (case-sensitive, no leading/trailing spaces)
+5. Check the backend log for `token validated → user_id=...`. If you see `token not found`, the token is wrong or has been rotated — generate a new one on the Settings page
+6. Windows Firewall may block port 5000 — add an inbound rule: Windows Defender Firewall → Advanced Settings → Inbound Rules → New Rule → Port → TCP → 5000
+
+### Output window shows "Token not set — data not sent"
+
+Open the strategy's parameter dialog and fill in the `ConnectionToken` field with the token from the TradeMeter **Connect** page.
+
+### Strategy disconnects repeatedly
+
+- If TradeMeter is on a remote machine (Tailscale or server), confirm the host IP is reachable: run `ping <TradeMeterHost>` from the NinjaTrader machine
+- Ensure no VPN or firewall is blocking outbound TCP on port 5000 from the NinjaTrader machine
