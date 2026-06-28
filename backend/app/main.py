@@ -25,8 +25,10 @@ from app.core.redis import create_redis_client
 from app.db.database import create_pool, init_db
 from app.services.market_data.ingestion import consume_stream
 from app.services.market_data.tcp_listener import start_tcp_server
-from app.api.routes.auth import router as auth_router
-from app.api.routes.market import router as market_router
+from app.api.routes.auth        import router as auth_router
+from app.api.routes.market      import router as market_router
+from app.api.routes.predictions import router as predictions_router
+from app.api.routes.models      import router as models_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -96,8 +98,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth_router,   prefix="/auth",   tags=["auth"])
-app.include_router(market_router, prefix="/market", tags=["market"])
+app.include_router(auth_router,         prefix="/auth",        tags=["auth"])
+app.include_router(market_router,       prefix="/market",      tags=["market"])
+app.include_router(predictions_router,  prefix="/predictions", tags=["predictions"])
+app.include_router(models_router,       prefix="/models",      tags=["models"])
 
 
 @app.get("/health", tags=["system"])
