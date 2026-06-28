@@ -1,1 +1,34 @@
-// Axios instance with baseURL from env, JWT cookie auto-attached via withCredentials, interceptors for 401 (redirect to login) and 500 (toast error). Exports: getModels(), getModelSettings(id), updateModelSettings(id, data), resetModel(id), getHistory(params), getLeaderboard(), getLatestPredictions()
+import axios from 'axios'
+
+const api = axios.create({
+  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
+  withCredentials: true,
+})
+
+api.interceptors.response.use(
+  res => res,
+  err => {
+    if (err.response?.status === 401) window.location.href = '/login'
+    return Promise.reject(err)
+  }
+)
+
+export const getMe             = ()           => api.get('/auth/me')
+export const getNTStatus       = ()           => api.get('/auth/nt-status')
+export const getNTToken        = ()           => api.get('/auth/nt-token')
+export const logout            = ()           => api.post('/auth/logout')
+
+export const getModels         = ()           => api.get('/models')
+export const getModelLevel     = (name)       => api.get(`/models/${name}/level`)
+export const getModelSettings  = (name)       => api.get(`/models/${name}/settings`)
+export const updateModelSettings = (name, d) => api.put(`/models/${name}/settings`, d)
+export const resetModel        = (name)       => api.post(`/models/${name}/reset`)
+export const getLeaderboardPnl = ()           => api.get('/models/leaderboard')
+export const getLeaderboardLvl = ()           => api.get('/models/leaderboard/levels')
+export const getModelHistory   = (name, p)   => api.get(`/models/${name}/history`, { params: p })
+
+export const getHistory            = (params) => api.get('/market/history',      { params })
+export const getPredictionsHistory = (params) => api.get('/predictions/history', { params })
+export const getLatestPredictions  = ()       => api.get('/predictions/latest')
+
+export default api

@@ -6,8 +6,12 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://localhost:8000',
-      '/ws': { target: 'ws://localhost:8000', ws: true }
-    }
-  }
+      '/auth':        'http://localhost:8000',
+      '/models':      'http://localhost:8000',
+      '/market':      'http://localhost:8000',
+      '/predictions': 'http://localhost:8000',
+      '/settings':    'http://localhost:8000',
+      '/ws':          { target: 'ws://localhost:8000', ws: true },
+    },
+  },
 })
