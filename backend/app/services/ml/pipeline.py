@@ -1,1 +1,1 @@
-# ML pipeline orchestrator — coordinates predict_one → broadcast → learn_one cycle across all three models
+# ML pipeline orchestrator — MODEL_REGISTRY dict mapping model names to instances, predict_all(features, user_id) calls all 10 models in parallel, learn_all(features, label, user_id) updates all models, snapshot_all() saves to MLflow every MODEL_SNAPSHOT_INTERVAL bars

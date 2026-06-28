@@ -1,0 +1,1 @@
+# ADWIN drift detector wrapper — one detector instance per model per user, monitors rolling accuracy stream, fires alert and resets model weights when accuracy drops below DRIFT_ACCURACY_THRESHOLD, logs drift event to MLflow and pushes WebSocket notification

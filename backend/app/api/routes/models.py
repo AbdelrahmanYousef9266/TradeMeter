@@ -1,0 +1,1 @@
+# GET /api/v1/models (all 10 models + status), GET /api/v1/models/leaderboard (ranked by today P&L), GET /api/v1/models/{id} (single model detail), GET /api/v1/models/{id}/settings, PUT /api/v1/models/{id}/settings, POST /api/v1/models/{id}/reset, GET /api/v1/models/{id}/history

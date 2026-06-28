@@ -1,1 +1,1 @@
-// Login page — renders GoogleLoginButton, redirects to /connect after successful OAuth callback
+// Google OAuth login page — single "Sign in with Google" button, redirects to /auth/google, shows TradeMeter logo and tagline

@@ -1,1 +1,1 @@
-# User model — Pydantic schema and DB row for users table (id, google_id, email, nt_token_hash, settings)
+# SQLAlchemy model: User table — id (uuid), email, google_id, nt_token_hash, nt_connected (bool), nt_last_seen (timestamp), created_at. One user can have multiple personal models (user_id FK in model_weights table)

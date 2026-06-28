@@ -1,0 +1,1 @@
+// Reusable model behavior form — signal mode radio (Aggressive/Balanced/Conservative), confidence threshold slider, max signals per session slider, learning on/off toggle, learning rate slider, drift detection toggle, plus children slot for model-specific params (e.g. Volume spike threshold)

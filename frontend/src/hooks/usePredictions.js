@@ -1,1 +1,1 @@
-// usePredictions hook — selects prediction and model metrics slices from Zustand store for component consumption
+// Custom hook — fetches /api/v1/predictions/latest on mount, subscribes to WebSocket updates via Zustand, returns current signals for all 10 models and latest bar data

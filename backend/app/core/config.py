@@ -1,1 +1,1 @@
-# Pydantic-settings config — loads all environment variables from .env with type validation
+# Pydantic-settings config — loads env vars: GOOGLE_CLIENT_ID, JWT_SECRET, DATABASE_URL, REDIS_URL, NT_TCP_PORT, MLFLOW_TRACKING_URI, MODEL_SNAPSHOT_INTERVAL (default 100), DRIFT_ACCURACY_THRESHOLD (default 0.60)

@@ -1,1 +1,1 @@
-# Security helpers — JWT mint/verify, NT token generation (TM-XXXXXX), SHA-256 token hashing
+# JWT creation/validation, NT connection token generation (8-char alphanumeric prefixed TM-), bcrypt hashing for token storage, Google OAuth token verification

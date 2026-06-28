@@ -1,1 +1,1 @@
-# Auth routes — GET /auth/google, GET /auth/google/callback, GET /auth/me, POST /auth/logout
+# Google OAuth endpoints: GET /auth/google (redirect), GET /auth/google/callback (issue JWT), POST /auth/logout (clear cookie), GET /auth/me, GET /auth/nt-token (get/generate user's NT token), GET /auth/nt-status (check if NT is currently connected), POST /auth/rotate-token

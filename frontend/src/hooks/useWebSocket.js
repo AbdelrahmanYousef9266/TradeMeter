@@ -1,1 +1,1 @@
-// useWebSocket hook — manages WS connection to /ws/live, auto-reconnect, dispatches messages to Zustand store
+// Custom hook — connects to WS /market/live, parses incoming bar + 10 model signals, dispatches to Zustand store via updateModelSignal and setBar, handles reconnect with exponential backoff on connection drop

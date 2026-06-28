@@ -48,11 +48,11 @@ All commit messages must follow [Conventional Commits](https://www.conventionalc
 **Examples:**
 
 ```
-feat(ml): add ADWIN drift detector to direction model
+feat(ml): add ADWIN drift detector to all 10 models
 fix(auth): handle expired Google token on callback
 docs(api): add WebSocket message format to API.md
 refactor(ingestion): extract feature computation to features.py
-test(auth): add tests for token rotation endpoint
+test(models): add tests for personal model blend weight computation
 chore(deps): bump river to 0.21.0
 ```
 
@@ -71,7 +71,7 @@ pytest tests/ -v
 ```bash
 cd frontend
 npm run lint
-npm run build  # catches type and import errors
+npm run build
 ```
 
 ---
@@ -85,14 +85,22 @@ ruff check app/
 black app/
 ```
 
-CI will fail if either tool reports violations.
-
 **JavaScript/JSX** — enforced by ESLint:
 ```bash
 cd frontend
 npm run lint
 ```
 
-Configure your editor to run formatters on save:
-- Python: Black formatter
-- JS/JSX: Prettier (add to devDependencies if needed)
+---
+
+## Adding a New Model Personality
+
+To add an 11th (or any additional) model personality:
+
+1. Create `backend/app/services/ml/models/your_model.py`
+   - Implement the `BaseModel` interface: `predict_one(x)`, `learn_one(x, y)`, `reset()`, `get_settings()`, `update_settings(settings_dict)`
+   - Choose a River algorithm appropriate for the personality
+2. Register it in `backend/app/services/ml/pipeline.py` `MODEL_REGISTRY` dict with a unique string key
+3. Add its default settings schema to `backend/app/models/model_settings.py`
+4. Add the model's personality description to `docs/ML.md`
+5. The model will automatically appear in the dashboard model grid on next backend restart — no frontend changes needed

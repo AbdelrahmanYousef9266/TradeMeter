@@ -2,105 +2,158 @@
 
 ## Overview
 
-TradeMeter uses **incremental (online) machine learning** via the River library. Unlike batch ML where you train once on historical data and periodically retrain, River models update their internal state on every single data point using `learn_one()`. This means the models are always adapting to current market conditions without any retraining jobs, growing datasets, or scheduled refreshes.
+TradeMeter runs **10 parallel incremental ML models** using the River library. All 10 models receive the same feature vector on every bar close. Each model independently calls `.predict_one()` to generate its signal, then `.learn_one()` when the next bar's actual outcome is known. No model shares weights with any other. No historical dataset is stored. No retraining jobs are scheduled.
 
-The ML pipeline runs as an async task inside the FastAPI process, consuming bars from Redis Streams as they arrive.
+All models output three values per bar: **direction** (up/down probability), **price target** (predicted high and low), and **signal** (BUY / SELL / HOLD with confidence %).
 
 ---
 
-## Three Models
+## Model Table
 
-| Model | Algorithm | Input | Output |
-|---|---|---|---|
-| **Direction** | Hoeffding Tree Classifier | 10 feature vector | `{"up": 0.72, "down": 0.28}` — probability of next close > current close |
-| **Price Target** | SNARIMAX (River time series) | Close price history | `{"low": 5099.0, "high": 5103.5}` — predicted range for next N bars |
-| **Signal** | Logistic Regression + rule overlay | Direction prob + features | `"BUY"` / `"SELL"` / `"HOLD"` |
+| # | Name | Personality | River Algorithm | Signal style |
+|---|------|-------------|-----------------|--------------|
+| 1 | Scalper | Ultra short-term, high frequency | HoeffdingTreeClassifier | Aggressive — many signals, tight targets |
+| 2 | Momentum | Trend follower | LogisticRegression | Medium — EMA cross driven |
+| 3 | Mean Reversion | Fades extremes | HoeffdingTreeClassifier | Medium — RSI extreme driven |
+| 4 | Breakout Hunter | Breakout entries | HoeffdingTreeClassifier | Medium — ATR/volume spike driven |
+| 5 | Conservative | Low risk, small moves | GaussianNaiveBayes | Rare — 75%+ confidence required |
+| 6 | Aggressive | High risk, big moves | LogisticRegression | Frequent — 50% threshold |
+| 7 | Volume | Order flow based | HoeffdingTreeClassifier | Medium — volume delta dominant |
+| 8 | Contrarian | Bets against the crowd | LogisticRegression | Inverts majority consensus |
+| 9 | You (personal) | Your personal hybrid | Ensemble (blends 1-8) | Shifts toward current best performers |
+| 10 | Brother (personal) | Brother's personal hybrid | Ensemble (blends 1-8) | Separate weights, same blend logic |
 
-All three models update (`learn_one`) and predict (`predict_one`) on every bar in sequence.
+---
+
+## Personal Models (9 and 10)
+
+Models 9 and 10 are instances of the same `PersonalModel` class, scoped by `user_id`.
+
+**Blend weight computation (runs on every bar):**
+1. Compute rolling 50-bar accuracy for each of models 1-8
+2. Normalize accuracies to sum to 1.0 → these become blend weights
+3. If the user has set manual overrides in ModelSettings, apply them on top (user overrides clamp and renormalize)
+4. Final signal = weighted average of models 1-8 predictions using computed weights
+
+**Learning from trading decisions:**
+When a user manually marks a trade outcome in the dashboard, the personal model calls `.learn_one()` with that label, independent of the bar-close label. This lets the personal model learn which signals the user actually acted on and how those resolved.
+
+**Independence:** Model 9 (your account) and Model 10 (brother's account) have completely independent blend weights, learning histories, and manual overrides. They happen to use the same code class but nothing is shared between them.
 
 ---
 
 ## Features
 
-Ten features are computed from raw OHLCV data before being passed to the models:
+Ten features are computed from raw OHLCV data by `features.py` before being passed to any model:
 
 | Feature | Description |
 |---|---|
-| `returns_1` | Close-to-close return: `(close - prev_close) / prev_close` |
-| `returns_5` | 5-bar rolling return |
-| `hl_range` | High-low range normalized by close: `(high - low) / close` |
-| `body_ratio` | Candle body as fraction of range: `abs(close - open) / (high - low)` |
-| `upper_wick` | Upper wick fraction: `(high - max(open, close)) / (high - low)` |
-| `lower_wick` | Lower wick fraction: `(min(open, close) - low) / (high - low)` |
-| `vol_z` | Volume z-score over rolling 20-bar window |
-| `rsi_14` | RSI(14) computed incrementally |
-| `ema_diff` | (EMA9 - EMA21) / close — momentum signal |
-| `bar_of_session` | Bar index within current RTH session (captures time-of-day pattern) |
+| `rsi_14` | RSI(14) computed incrementally using River's rolling mean |
+| `ema_9` | Exponential moving average over 9 bars |
+| `ema_21` | Exponential moving average over 21 bars |
+| `ema_50` | Exponential moving average over 50 bars |
+| `macd` | MACD line: EMA(12) − EMA(26) |
+| `macd_signal` | Signal line: EMA(9) of MACD |
+| `atr_14` | Average True Range over 14 bars (volatility gauge) |
+| `volume_delta` | Current bar volume minus 20-bar rolling mean (normalized) |
+| `bar_range` | High − Low (absolute range of current bar) |
+| `close_position` | (Close − Low) / (High − Low) — where close sits in bar's range, 0–1 |
+
+All features use River's rolling stat primitives (`EWMean`, `RollingMean`, `RollingVar`) — they update in O(1) per bar with no stored history.
 
 ---
 
 ## Incremental Learning Loop
 
 ```
-New bar arrives from Redis Stream
-         │
-         ▼
-  features.py: compute feature vector x
-         │
-         ▼
-  direction_model.predict_one(x)  → direction_proba
-  target_model.predict_one(x)     → price_range
-  signal_model.predict_one(x)     → signal
-         │
-         ▼
-  Broadcast prediction to WebSocket clients
-         │
-         ▼
-  Wait for next bar's actual outcome (y = did_price_go_up)
-         │
-         ▼
-  direction_model.learn_one(x, y)
-  target_model.learn_one(x, actual_close)
-  signal_model.learn_one(x, y)
-         │
-         ▼
-  Log metrics to MLflow
-  (accuracy, MAE, bar_count)
-         │
-         └── every MODEL_SNAPSHOT_INTERVAL bars:
-             save model snapshot to MLflow registry
+New bar closes (NinjaTrader sends OHLCV via TCP)
+      │
+      ▼
+Feature engine — computes all 10 features → feature dict x
+      │
+      ├──► Model 1  (Scalper)        .predict_one(x) → signal_1
+      ├──► Model 2  (Momentum)       .predict_one(x) → signal_2
+      ├──► Model 3  (Mean Reversion) .predict_one(x) → signal_3
+      ├──► Model 4  (Breakout)       .predict_one(x) → signal_4
+      ├──► Model 5  (Conservative)   .predict_one(x) → signal_5
+      ├──► Model 6  (Aggressive)     .predict_one(x) → signal_6
+      ├──► Model 7  (Volume)         .predict_one(x) → signal_7
+      ├──► Model 8  (Contrarian)     .predict_one(x) → signal_8
+      ├──► Model 9  (You)            .predict_one(x) → signal_9   (blends 1-8)
+      └──► Model 10 (Brother)        .predict_one(x) → signal_10  (blends 1-8)
+                │
+                ▼
+        All 10 signals → WebSocket broadcast to dashboard
+                │
+                ▼
+        Write predictions to TimescaleDB (predictions table)
+                │
+                ▼
+        Next bar closes — actual outcome (y) is now known
+        y = 1 if close > prev_close else 0
+                │
+                ▼
+        All 10 models: .learn_one(x, y)
+                │
+                ▼
+        ADWIN drift detectors updated with accuracy reading
+                │
+                ▼
+        Every 100 bars: MLflow snapshot for all models
+        (tagged with user_id, model_name, bar_count, accuracy)
 ```
-
-The key insight: prediction happens first (before the outcome is known), then learning happens on the next bar when the outcome is available. This mirrors real trading — you act on a prediction, then observe what actually happened.
 
 ---
 
-## MLflow Model Registry
+## Per-Model Settings
 
-MLflow runs as a Docker service at `http://localhost:5001`.
+Every model exposes behavior controls stored in the `model_settings` table (JSONB per user per model):
 
-**What is logged on every bar:**
-- `direction_accuracy` — rolling accuracy of the direction model
-- `target_mae` — mean absolute error of price target predictions
-- `bar_count` — total bars processed per user
+| Setting | Type | Description |
+|---|---|---|
+| `signal_mode` | enum | `aggressive` / `balanced` / `conservative` preset that adjusts thresholds |
+| `min_confidence` | float 0–1 | Minimum confidence to emit a signal (below this → HOLD) |
+| `max_signals_per_session` | int | Cap on BUY/SELL signals per RTH session |
+| `learning_enabled` | bool | Pause/resume `.learn_one()` calls for this model |
+| `learning_rate` | float | Override model's internal learning rate (where applicable) |
+| `drift_detection_enabled` | bool | Enable/disable ADWIN monitoring for this model |
+| `model_params` | dict | Model-specific params (see below) |
 
-**Snapshots** are taken every `MODEL_SNAPSHOT_INTERVAL` bars (default: 100) and registered in MLflow under the model name `trademeter_direction`, `trademeter_target`, `trademeter_signal`. This allows rollback to a prior checkpoint if drift correction overshoots.
+**Model-specific params examples:**
+
+| Model | Extra params |
+|---|---|
+| Scalper | `lookback_bars`, `profit_ticks`, `stop_ticks` |
+| Conservative | `confidence_floor` (hard minimum above `min_confidence`) |
+| Volume | `spike_threshold`, `delta_imbalance_cutoff`, `lookback_window` |
+| Aggressive | `target_multiplier` (scales price target width) |
+| Personal (9/10) | `blend_overrides` (dict of model → manual weight, null = auto) |
 
 ---
 
 ## Drift Detection
 
-TradeMeter uses River's **ADWIN** (Adaptive Windowing) drift detector on the direction model's accuracy stream.
+TradeMeter uses River's **ADWIN** (Adaptive Windowing) drift detector. One detector instance exists per model per user, managed by `drift.py`.
 
-| Parameter | Default | Description |
-|---|---|---|
-| `DRIFT_ACCURACY_THRESHOLD` | `0.60` | If rolling accuracy drops below this, drift is flagged |
-| ADWIN delta | `0.002` | Sensitivity of the statistical change detector |
+**Trigger condition:** If a model's rolling accuracy drops below `DRIFT_ACCURACY_THRESHOLD` (default 0.60) AND ADWIN confirms a statistically significant change point, the following happens:
 
-**When drift is detected:**
-1. The affected model is reset to a fresh instance (weights cleared)
-2. A drift event is logged to MLflow with the bar timestamp and user_id
-3. A WebSocket notification is pushed to the dashboard: `{"type": "drift", "model": "direction"}`
-4. The model begins re-learning from scratch on live data
+1. Model weights are reset to a fresh instance (same class, same hyperparams, zero history)
+2. A `drift` event is written to TimescaleDB
+3. A WebSocket notification pushes `{"type": "drift", "model": "scalper"}` to the user's dashboard
+4. MLflow logs the drift event with the bar count and accuracy at time of reset
 
-Resetting rather than rolling back is intentional: if drift is detected, it means the old model's weights are no longer valid for the current regime. A fresh model adapts faster than one loaded from a stale snapshot.
+Each model's drift detector is fully independent — a drift reset on the Scalper does not affect Momentum or any other model. Personal models (9/10) have their own drift detectors scoped by user_id.
+
+---
+
+## MLflow Model Registry
+
+MLflow runs at `http://localhost:5001`.
+
+Every 100 bars, `snapshot_all()` is called:
+- Each model is serialized with `pickle` and logged via `mlflow.log_artifact()`
+- Metrics logged: `rolling_accuracy_50`, `total_bars_seen`, `drift_events`
+- Tags: `user_id`, `model_name`, `bar_count`
+- Registered under run names: `trademeter_{model_name}_{user_id}`
+
+**Rollback:** `mlflow.artifacts.download_artifacts(run_id=...)` retrieves any prior snapshot. The pipeline can hot-swap a model instance without restarting the backend.

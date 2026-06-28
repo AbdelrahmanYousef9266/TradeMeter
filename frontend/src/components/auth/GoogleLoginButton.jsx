@@ -1,1 +1,1 @@
-// Google login button — styled button that redirects to /auth/google to begin OAuth flow
+// Styled Google login button — calls window.location.href = '/auth/google' on click, shows Google logo icon alongside "Sign in with Google" text

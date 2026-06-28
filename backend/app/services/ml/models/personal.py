@@ -1,0 +1,1 @@
+# Personal hybrid model (used for both Model 9 and 10, scoped by user_id) — ensemble that blends predictions from models 1-8 weighted by rolling 50-bar accuracy, supports user-adjustable blend_overrides in ModelSettings, also calls learn_one() on user's manually marked trade outcomes

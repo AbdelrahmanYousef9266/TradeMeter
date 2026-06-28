@@ -1,1 +1,1 @@
-// NT connect flow — step-by-step UI showing token, copy button, and instructions to paste into NinjaTrader
+// Multi-step NT connection UI — Step 1: show token with copy button, Step 2: instructions with NinjaTrader screenshot placeholders, Step 3: live connection status (polling /auth/nt-status every 3s), Step 4: success state with link to dashboard

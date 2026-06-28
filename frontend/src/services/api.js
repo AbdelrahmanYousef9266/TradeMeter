@@ -1,1 +1,1 @@
-// Axios API client — base URL /api/v1, auth cookie handling, typed request helpers for all REST endpoints
+// Axios instance with baseURL from env, JWT cookie auto-attached via withCredentials, interceptors for 401 (redirect to login) and 500 (toast error). Exports: getModels(), getModelSettings(id), updateModelSettings(id, data), resetModel(id), getHistory(params), getLeaderboard(), getLatestPredictions()

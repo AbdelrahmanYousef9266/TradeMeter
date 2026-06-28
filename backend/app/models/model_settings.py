@@ -1,0 +1,1 @@
+# SQLAlchemy model: ModelSettings table — user_id, model_name, settings_json (JSONB). Stores per-user per-model behavior config (signal mode, confidence threshold, max signals, learning rate, drift detection, model-specific params). Primary key: (user_id, model_name).

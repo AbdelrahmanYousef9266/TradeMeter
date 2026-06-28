@@ -1,1 +1,1 @@
-// Root App component — defines routes: /login, /connect, /dashboard, /settings with auth guard
+// Route definitions — / → Login if not authed, /connect → NTConnectFlow, /dashboard → Dashboard, /settings → Settings, /models/:id → ModelSettings page

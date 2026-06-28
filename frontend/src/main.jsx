@@ -1,1 +1,1 @@
-// React 18 entry point — mounts App into #root, wraps with BrowserRouter
+// React 18 entry point — renders App inside BrowserRouter and Zustand provider

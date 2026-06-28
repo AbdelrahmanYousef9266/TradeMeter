@@ -1,1 +1,1 @@
-# Prediction model — Pydantic schema for ML output: direction proba, price target range, signal
+# SQLAlchemy model: Prediction table — id, time, user_id, model_name, signal (BUY/SELL/HOLD), confidence, predicted_high, predicted_low, direction_up_prob, actual_outcome (nullable, filled on next bar close)

@@ -1,1 +1,1 @@
-# Market data routes — GET /api/v1/market/history, GET /api/v1/market/status, WebSocket /ws/live
+# GET /api/v1/market/history (OHLCV bars with filters), WS /market/live (streams bar + all 10 model signals per bar close)

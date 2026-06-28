@@ -1,1 +1,1 @@
-// Strategy config form — signal threshold slider, alert toggles, save button with PUT /api/v1/settings
+// Global strategy settings form — instrument text input, bar type selector (1MIN/3MIN/5MIN/TICK), submit button saves to PUT /api/v1/settings

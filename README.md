@@ -1,54 +1,68 @@
 # TradeMeter
 
-**Live ML-powered trading dashboard for NinjaTrader 8**
+**Live ML trading dashboard — 10 incremental models, real-time signals, multi-user**
 
 ![Status](https://img.shields.io/badge/status-in%20development-yellow)
-![Stack](https://img.shields.io/badge/stack-FastAPI%20%7C%20React%20%7C%20Redis%20%7C%20TimescaleDB-blue)
+![Stack](https://img.shields.io/badge/stack-FastAPI%20%7C%20React%20%7C%20Redis%20%7C%20TimescaleDB%20%7C%20River%20%7C%20MLflow-blue)
 ![Auth](https://img.shields.io/badge/auth-Google%20OAuth%20%2B%20NT%20Token-green)
 
 ---
 
 ## What is TradeMeter?
 
-TradeMeter connects your NinjaTrader 8 instance to a live machine learning pipeline and serves real-time predictions directly to a web dashboard. On every new bar, the NinjaTrader strategy sends OHLCV data over TCP to the TradeMeter backend, which processes the tick, updates three incremental River models, and pushes results via WebSocket to your browser.
+TradeMeter streams live MES futures data from NinjaTrader 8 into a backend that runs **10 parallel incremental ML models** — each with its own trading personality. Every bar close triggers all 10 models simultaneously: they predict direction, price target, and a BUY / SELL / HOLD signal with confidence percentage. All models learn from every bar using River's online learning — no retraining jobs, no batch datasets.
 
-**Three prediction outputs on every bar:**
+The predictions stream via WebSocket to a React dashboard that shows a live leaderboard ranking models by today's P&L, a grid of 10 model cards updating in real time, and a candlestick chart with signal overlays.
 
-| Output | Description |
+| Model | Personality |
 |---|---|
-| **Direction** | Probability the next bar closes higher (0–1) |
-| **Price Target** | Predicted price range for the next N bars |
-| **Signal** | Discrete action recommendation: BUY / SELL / HOLD |
+| Scalper | Ultra short-term, high frequency |
+| Momentum | Trend follower |
+| Mean Reversion | Fades extremes |
+| Breakout Hunter | Breakout entries |
+| Conservative | Low risk, small moves |
+| Aggressive | High risk, big moves |
+| Volume | Order flow based |
+| Contrarian | Bets against the crowd |
+| You (Model 9) | Your personal hybrid — blends best performers |
+| Brother (Model 10) | Brother's personal hybrid — same blend logic, separate weights |
+
+**Each user gets their own Google account, NT token, and personal hybrid model. Data is fully isolated per user.**
 
 ---
 
 ## Architecture
 
 ```
-NinjaTrader 8
-  [LiveDataFeedStrategy.cs]
-       |
-       | TCP (port 5000)  +  connection token
-       v
-  TradeMeter Backend (FastAPI)
-  [tcp_listener.py]
-       |
-       v
-  Redis Streams  ──────────────────────────────────┐
-  [market_data stream]                             |
-       |                                           |
-       v                                           |
-  ML Pipeline (River)                        TimescaleDB
-  [direction, target, signal models]         [tick history]
-       |
-       v
-  WebSocket broadcaster
-  [/ws/live]
-       |
-       v
-  React Dashboard (Recharts)
-  [LiveChart + PredictionPanel + ModelMetrics]
+NinjaTrader 8 (C# strategy + connection token)
+        │  TCP :5000
+        ▼
+Redis Streams  ──►  FastAPI backend
+                         │
+              ┌──────────┼──────────┐
+              ▼          ▼          ▼
+        Feature      10 River    TimescaleDB
+        engine       models      (permanent)
+              │          │
+              └────┬─────┘
+                   ▼
+             MLflow registry
+             (snapshots every 100 bars)
+                   │
+             WebSocket feed
+                   │
+          React dashboard
+          (10 model cards + leaderboard)
 ```
+
+---
+
+## Auth Flow
+
+1. User visits TradeMeter and clicks **Sign in with Google**
+2. After OAuth completes, the Connect page shows a unique NinjaTrader token (e.g. `TM-a3f9x2`)
+3. User pastes the token into the `ConnectionToken` parameter in their NinjaTrader strategy
+4. Strategy sends the token with every TCP message — backend links the data stream to the user, connection status turns green
 
 ---
 
@@ -79,26 +93,32 @@ npm run dev
 
 ---
 
-## Auth Flow
+## Tech Stack
 
-1. User visits TradeMeter and clicks **Sign in with Google**
-2. After Google OAuth completes, a JWT cookie is set and a unique NinjaTrader connection token is generated (e.g. `TM-a3f9x2`)
-3. User copies the token from the **Connect** page
-4. User pastes the token into the `ConnectionToken` parameter of the NinjaTrader strategy
-5. Strategy includes the token in every TCP message — backend links the data stream to the user session
+| Layer | Technology |
+|---|---|
+| NinjaTrader strategy | C# / NinjaScript (.NET 4.8) |
+| Message broker | Redis Streams |
+| Backend API | FastAPI + uvicorn (Python 3.11) |
+| ML | River (incremental) — Hoeffding Tree, Logistic Regression, Naive Bayes |
+| Model registry | MLflow |
+| Database | TimescaleDB (PostgreSQL 16) |
+| Auth | Google OAuth 2.0 + JWT + NT connection token |
+| Frontend | React 18 + Vite + Recharts + Zustand |
+| Proxy | Nginx |
+| Infra | Docker Compose |
 
 ---
 
-## Project Structure
+## Multi-User
 
-| Path | Description |
-|---|---|
-| `ninja-strategy/` | C# NinjaScript strategy that sends data over TCP |
-| `backend/` | FastAPI app — TCP listener, ML pipeline, WebSocket, REST API |
-| `frontend/` | React 18 + Vite dashboard |
-| `ml/` | Feature definitions and MLflow config |
-| `infra/` | Docker Compose + Nginx config |
-| `docs/` | Full documentation |
+TradeMeter is designed for multiple independent users. Each user:
+- Logs in with their own Google account
+- Gets a unique NinjaTrader connection token
+- Has fully isolated tick history, prediction history, and model weights
+- Gets their own personal hybrid model that blends the best-performing models for them
+
+Two users (or more) can connect from separate machines simultaneously with no data crossover.
 
 ---
 
@@ -108,28 +128,11 @@ npm run dev
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, data flow, design decisions |
 | [docs/SETUP.md](docs/SETUP.md) | Complete local setup guide |
-| [docs/AUTH.md](docs/AUTH.md) | Auth design — Google OAuth + NT token |
-| [docs/ML.md](docs/ML.md) | ML pipeline, features, models, drift detection |
+| [docs/AUTH.md](docs/AUTH.md) | Two-step auth — Google OAuth + NT token |
+| [docs/ML.md](docs/ML.md) | 10 models, features, incremental learning, drift detection |
 | [docs/API.md](docs/API.md) | REST + WebSocket API reference |
-| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Branching, commits, code style |
+| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Branching, commits, code style, adding new models |
 | [ninja-strategy/README.md](ninja-strategy/README.md) | NinjaTrader install guide |
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| NinjaTrader strategy | C# / NinjaScript |
-| TCP → stream bridge | Python asyncio |
-| Message broker | Redis Streams |
-| Backend API | FastAPI + uvicorn |
-| ML | River (incremental) + MLflow |
-| Database | TimescaleDB (PostgreSQL 16) |
-| Auth | Google OAuth 2.0 + JWT |
-| Frontend | React 18 + Vite + Recharts + Zustand |
-| Proxy | Nginx |
-| Infra | Docker Compose |
 
 ---
 

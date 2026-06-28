@@ -1,1 +1,1 @@
-# Feature engineering — computes all 10 features (returns, range, wicks, vol_z, RSI, EMA diff, bar_of_session) from raw OHLCV
+# Feature computation from raw OHLCV bar — returns dict with: rsi_14, ema_9, ema_21, ema_50, macd, macd_signal, atr_14, volume_delta, bar_range, close_position. Uses River's rolling stat primitives for O(1) per-bar efficiency.

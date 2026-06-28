@@ -1,0 +1,1 @@
+# Blend logic for personal models — computes rolling 50-bar accuracy per model, normalizes to weights, applies user overrides from ModelSettings, returns weighted ensemble prediction combining signals from models 1-8

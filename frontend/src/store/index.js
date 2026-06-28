@@ -1,1 +1,1 @@
-// Zustand global store — slices: bars (rolling 200), latestPrediction, modelMetrics, connectionStatus
+// Zustand global store — state: { user, ntConnected, currentBar, modelSignals (object keyed by model name), leaderboard (array sorted by P&L), settings }. Actions: setUser, setBar, updateModelSignal, updateLeaderboard, setNtConnected, setSettings

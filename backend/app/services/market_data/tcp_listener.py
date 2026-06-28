@@ -1,1 +1,1 @@
-# Asyncio TCP server — accepts NinjaTrader connections, validates token, publishes bars to Redis Streams
+# Async TCP server on NT_TCP_PORT (default 5000) — accepts connections, reads newline-delimited messages, validates format (TOKEN|TIMESTAMP|SYMBOL|OPEN|HIGH|LOW|CLOSE|VOLUME|BAR_TYPE), looks up user by bcrypt token hash, publishes validated tick to Redis Streams market:raw

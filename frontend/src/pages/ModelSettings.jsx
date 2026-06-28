@@ -1,0 +1,1 @@
+// Per-model settings page — loads /api/v1/models/:id/settings, renders ModelBehavior form (signal mode preset, confidence threshold, max signals, learning rate, drift detection, model-specific params), save and reset buttons

@@ -1,1 +1,1 @@
-// Connect page — displays user's NT connection token and NTConnectFlow instructions, links to dashboard
+// NinjaTrader connection page — shows user's NT token in a copyable code block, real-time connection status indicator (polling /auth/nt-status every 3s), step-by-step instructions for pasting token into NinjaTrader strategy params

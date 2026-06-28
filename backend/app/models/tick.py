@@ -1,1 +1,1 @@
-# Tick model — Pydantic schema for incoming OHLCV bars from NinjaTrader TCP stream
+# SQLAlchemy model: Tick table (TimescaleDB hypertable) — time, user_id, symbol, open, high, low, close, volume, bar_type. Hypertable partitioned by time column.

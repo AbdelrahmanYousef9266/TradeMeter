@@ -1,1 +1,1 @@
-// Recharts ComposedChart streaming live OHLCV bars — candlestick rendering with price target overlay
+// Recharts ComposedChart — OHLCV candlestick bars, EMA(9/21/50) overlay lines, BUY/SELL arrow markers from selected model's signals, price target shaded region, current price horizontal line

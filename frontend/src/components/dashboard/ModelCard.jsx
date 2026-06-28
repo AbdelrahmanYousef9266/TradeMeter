@@ -1,0 +1,1 @@
+// Single model card component — shows model name, personality tag, signal badge (BUY/SELL/HOLD + confidence %), accuracy %, today P&L, price target range, stop level, accuracy progress bar, "Tune behavior" button linking to /models/:id. Personal models (9/10) show blend weights and learning status with accent border.
