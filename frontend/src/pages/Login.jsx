@@ -1,6 +1,18 @@
+import { useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import GoogleLoginButton from '../components/auth/GoogleLoginButton'
+import api from '../services/api'
 
 export default function Login() {
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    // If already authenticated, skip the login page
+    api.get('/auth/me')
+      .then(() => navigate('/dashboard', { replace: true }))
+      .catch(() => {}) // not logged in — stay here, do nothing
+  }, [])
+
   return (
     <div style={{
       height: '100vh',
@@ -34,6 +46,10 @@ export default function Login() {
 
       <p style={{ marginTop: 20, fontSize: 12, color: 'var(--text-tertiary)', textAlign: 'center' }}>
         Connect your NinjaTrader account after signing in
+      </p>
+
+      <p style={{ marginTop: 12, fontSize: 11, color: 'var(--text-tertiary)', textAlign: 'center', maxWidth: 320 }}>
+        Your data is private and isolated to your account.
       </p>
     </div>
   )

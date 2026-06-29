@@ -48,9 +48,10 @@ function mockBar(price) {
   }
 }
 
-function startMock({ setBar, updateModelSignal, updateModelLevel, pushLevelUp, setNtConnected }) {
+function startMock({ setBar, updateModelSignal, updateModelLevel, pushLevelUp, setNtConnected, setWarmup }) {
   let price = 5840
   setNtConnected(true)
+  setWarmup({ isWarmingUp: false, ntConnected: true })
 
   const barInterval = setInterval(() => {
     price += (Math.random() - 0.48) * 2
@@ -71,10 +72,10 @@ function startMock({ setBar, updateModelSignal, updateModelLevel, pushLevelUp, s
 export function useWebSocket() {
   const ws = useRef(null)
   const reconnectDelay = useRef(1000)
-  const { setBar, updateModelSignal, updateModelLevel, pushLevelUp, setNtConnected } = useStore()
+  const { setBar, setCurrentBar, updateModelSignal, updateModelLevel, pushLevelUp, setNtConnected, setWarmup } = useStore()
 
   useEffect(() => {
-    if (MOCK) return startMock({ setBar, updateModelSignal, updateModelLevel, pushLevelUp, setNtConnected })
+    if (MOCK) return startMock({ setBar, updateModelSignal, updateModelLevel, pushLevelUp, setNtConnected, setWarmup })
 
     function connect() {
       const url = (import.meta.env.VITE_WS_URL || 'ws://localhost:8000') + '/market/live'
@@ -86,16 +87,41 @@ export function useWebSocket() {
       }
 
       ws.current.onmessage = (e) => {
-        let msg
-        try { msg = JSON.parse(e.data) } catch { return }
+        try {
+          const msg = JSON.parse(e.data)
+          console.log('[WS] message:', msg.type, `(${Object.keys(msg).length})`, Object.keys(msg))
 
-        if (msg.type === 'bar') {
-          setBar({ ...msg.bar, time: msg.time, features: msg.features })
-          Object.entries(msg.models || {}).forEach(([name, signal]) => updateModelSignal(name, signal))
-          Object.entries(msg.levels  || {}).forEach(([name, level])  => updateModelLevel(name, level))
+          if (msg.type === 'tick') {
+            // Real-time price update (inter-bar tick or warmup bar close).
+            // Updates the live price display only — does NOT create a new chart candle.
+            setCurrentBar({ time: msg.time, ...msg.bar })
+            // Warmup progress is embedded in tick messages during the 50-bar warmup period
+            if (msg.warmup?.warming_up) {
+              setWarmup({
+                barsReceived: msg.warmup.bars_received,
+                barsNeeded:   msg.warmup.bars_needed,
+                isWarmingUp:  true,
+                ntConnected:  true,
+              })
+            }
+          }
+
+          if (msg.type === 'bar') {
+            // Bar close with ML predictions — append new candle + update model cards
+            setBar({ ...msg.bar, time: msg.time, features: msg.features })
+            setWarmup({ isWarmingUp: false, ntConnected: true })
+            if (msg.models) {
+              Object.entries(msg.models).forEach(([name, signal]) => updateModelSignal(name, signal))
+            }
+            if (msg.levels) {
+              Object.entries(msg.levels).forEach(([name, level]) => updateModelLevel(name, level))
+            }
+          }
+
+          if (msg.type === 'level_up') pushLevelUp(msg)
+        } catch (err) {
+          console.error('[WS] parse error:', err)
         }
-
-        if (msg.type === 'level_up') pushLevelUp(msg)
       }
 
       ws.current.onclose = () => {

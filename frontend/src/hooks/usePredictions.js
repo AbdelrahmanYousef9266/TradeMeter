@@ -8,23 +8,19 @@ export function usePredictions() {
   useEffect(() => {
     getModels()
       .then(res => {
-        res.data.forEach(model => {
-          if (model.signal) {
-            updateModelSignal(model.model_name, {
-              signal:     model.signal,
-              confidence: model.confidence,
-            })
+        console.log('[Predictions] loaded', res.data?.length, 'models')
+        res.data?.forEach(model => {
+          if (model.level_info) {
+            updateModelLevel(model.name, model.level_info)
           }
-          updateModelLevel(model.model_name, {
-            level:           model.level,
-            xp_progress_pct: model.xp_progress_pct,
-            streak:          model.streak,
-            rank:            model.rank,
-            bars_learned:    model.bars_learned,
-          })
+          if (model.signal) {
+            updateModelSignal(model.name, model.signal)
+          }
         })
       })
-      .catch(() => {})
+      .catch(err => {
+        console.error('[Predictions] load failed:', err.response?.status, err.message)
+      })
   }, [])
 
   return { modelSignals, modelLevels }

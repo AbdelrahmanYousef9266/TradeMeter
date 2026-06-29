@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { usePredictions } from '../hooks/usePredictions'
 import Leaderboard   from '../components/dashboard/Leaderboard'
@@ -81,7 +81,14 @@ export default function Dashboard() {
   useWebSocket()
   usePredictions()
 
+  const navigate = useNavigate()
   const { modelSignals, modelLevels, levelUpQueue, barHistory, dismissLevelUp, user } = useStore()
+
+  useEffect(() => {
+    if (user && !user.nt_connected) {
+      navigate('/connect', { replace: true })
+    }
+  }, [user, navigate])
 
   const handleLogout = async () => {
     await apiLogout().catch(() => {})
@@ -108,7 +115,7 @@ export default function Dashboard() {
               onClick={handleLogout}
               style={{ fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' }}
             >
-              Logout
+              Sign out
             </span>
           )}
         </nav>

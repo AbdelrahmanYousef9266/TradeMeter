@@ -1,17 +1,20 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import NTConnectFlow from '../components/auth/NTConnectFlow'
-import { getNTToken, getNTStatus } from '../services/api'
+import { getNTToken, getNTStatus, getMe } from '../services/api'
+import useStore from '../store'
 
 export default function Connect() {
-  const navigate = useNavigate()
-  const [token, setToken]       = useState(null)
+  const navigate              = useNavigate()
+  const setUser               = useStore(s => s.setUser)
+  const [tokenData, setTokenData] = useState(null)
   const [connected, setConnected] = useState(false)
-  const [loading, setLoading]   = useState(true)
+  const [loading, setLoading] = useState(true)
 
+  // Fetch (or re-fetch) the NT token once on mount
   useEffect(() => {
     getNTToken()
-      .then(res => setToken(res.data.token || res.data.prefix))
+      .then(res => setTokenData(res.data))
       .catch(() => {})
       .finally(() => setLoading(false))
   }, [])
@@ -20,13 +23,23 @@ export default function Connect() {
   useEffect(() => {
     const poll = () => {
       getNTStatus()
-        .then(res => setConnected(res.data.connected ?? false))
+        .then(res => {
+          const isConnected = res.data.connected ?? false
+          setConnected(isConnected)
+
+          if (isConnected) {
+            // Refresh Zustand user so Dashboard sees nt_connected=true
+            getMe()
+              .then(r => setUser(r.data))
+              .catch(() => {})
+          }
+        })
         .catch(() => {})
     }
     poll()
     const id = setInterval(poll, 3000)
     return () => clearInterval(id)
-  }, [])
+  }, [setUser])
 
   if (loading) {
     return (
@@ -53,7 +66,7 @@ export default function Connect() {
       </div>
 
       <NTConnectFlow
-        token={token}
+        tokenData={tokenData}
         connected={connected}
         onContinue={() => navigate('/dashboard')}
       />

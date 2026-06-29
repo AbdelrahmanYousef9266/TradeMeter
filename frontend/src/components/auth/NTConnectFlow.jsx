@@ -5,14 +5,20 @@ const STEPS = [
   'Go to Strategies → Add Strategy → LiveDataFeedStrategy',
   'Paste your token into the ConnectionToken parameter',
   'Enable the strategy on your chart',
+  'Set TradeMeterHost to 127.0.0.1 and TradeMeterPort to 5000',
 ]
 
-export default function NTConnectFlow({ token, connected, onContinue }) {
+export default function NTConnectFlow({ tokenData, connected, onContinue }) {
   const [copied, setCopied] = useState(false)
 
+  // tokenData: { token, prefix, connected, first_issue }
+  const displayToken  = tokenData?.first_issue ? tokenData.token  : null
+  const displayPrefix = tokenData?.prefix || ''
+
   const handleCopy = () => {
-    if (!token) return
-    navigator.clipboard.writeText(token).then(() => {
+    const text = displayToken || displayPrefix
+    if (!text) return
+    navigator.clipboard.writeText(text).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     })
@@ -62,7 +68,7 @@ export default function NTConnectFlow({ token, connected, onContinue }) {
         Your Connection Token
       </p>
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 10, marginBottom: 24,
+        display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8,
         background: 'var(--surface-3)', borderRadius: 8, padding: '10px 14px',
         border: '1px solid var(--border)',
       }}>
@@ -70,7 +76,7 @@ export default function NTConnectFlow({ token, connected, onContinue }) {
           flex: 1, fontFamily: 'monospace', fontSize: 16,
           letterSpacing: '0.12em', color: 'var(--text-primary)',
         }}>
-          {token || '···'}
+          {displayToken ? displayToken : displayPrefix ? `${displayPrefix}···` : '···'}
         </code>
         <button
           onClick={handleCopy}
@@ -86,7 +92,26 @@ export default function NTConnectFlow({ token, connected, onContinue }) {
         </button>
       </div>
 
-      {/* Status */}
+      {/* First-issue warning */}
+      {tokenData?.first_issue && (
+        <div style={{
+          marginBottom: 16, padding: '8px 12px', borderRadius: 8,
+          background: 'var(--bg-warning)', border: '1px solid rgba(251,191,36,0.3)',
+        }}>
+          <p style={{ fontSize: 12, color: 'var(--text-warning)', margin: 0 }}>
+            This token is shown once only. Save it somewhere safe.
+          </p>
+        </div>
+      )}
+
+      {/* Repeat-issue note */}
+      {!tokenData?.first_issue && displayPrefix && (
+        <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 16 }}>
+          Token already issued. Contact support to reset.
+        </p>
+      )}
+
+      {/* Connection status */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20,
         padding: '8px 12px', borderRadius: 8,

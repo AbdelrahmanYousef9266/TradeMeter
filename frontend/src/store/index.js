@@ -7,15 +7,32 @@ const useStore = create((set) => ({
 
   // NT connection status (from WebSocket open/close)
   ntConnected: false,
-  setNtConnected: (v) => set({ ntConnected: v }),
+  setNtConnected: (v) => set(state => ({
+    ntConnected: v,
+    warmup: { ...state.warmup, ntConnected: v },
+  })),
+
+  // Warmup progress — updated from WS tick messages during the 50-bar warmup period
+  warmup: {
+    barsReceived: 0,
+    barsNeeded:   50,
+    isWarmingUp:  true,
+    ntConnected:  false,
+  },
+  setWarmup: (partial) => set(state => ({
+    warmup: { ...state.warmup, ...partial },
+  })),
 
   // Live bar data
   currentBar: null,
   barHistory: [],
+  // setBar: appends a new candle to history — use for bar closes only
   setBar: (bar) => set(state => ({
     currentBar: bar,
     barHistory: [...state.barHistory.slice(-199), bar],
   })),
+  // setCurrentBar: updates live price display only — use for ticks and warmup bars
+  setCurrentBar: (bar) => set({ currentBar: bar }),
 
   // Model signals keyed by model name
   // Each entry: { signal, confidence, direction_up, direction_down, predicted_high, predicted_low }
