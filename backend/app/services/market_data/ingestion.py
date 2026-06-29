@@ -190,29 +190,16 @@ async def _process_entry(
         except Exception as exc:
             logger.error("Ingestion: learn_all failed for user %s: %s", user_id, exc)
 
-    # ── 7–12. Predict → Open trades → Publish → Cache → Store → Level-ups ─
+    # ── 7–12. Predict → Publish → Cache → Store → Level-ups ──────────────
     try:
-        # 7. Predict on current bar
-        predictions = await pipeline.predict_all(features, tick.close)
-
-        # Open simulated trades for non-HOLD signals (Level 3)
-        # Using current bar open as proxy for next bar open (realistic fill)
-        atr = features.get("atr_14", 1.0)
-        for name, pred in predictions.items():
-            if pred.signal != "HOLD":
-                model = pipeline.models.get(name) or pipeline.personal
-                model_settings = model.get_settings()
-                pipeline.trade_manager.open_trade(
-                    model_name      = name,
-                    signal          = pred.signal,
-                    next_bar_open   = tick.open,
-                    atr             = atr,
-                    atr_stop_mult   = model_settings.get("atr_stop_mult",   1.5),
-                    atr_target_mult = model_settings.get("atr_target_mult", 3.0),
-                    confidence      = pred.confidence,
-                    features        = features,
-                    bar_time        = tick.time,
-                )
+        # 7. Predict on current bar + open simulated trades for non-HOLD signals
+        #    (trade opening delegated to predict_all for Phase 6A CC support)
+        predictions = await pipeline.predict_all(
+            features,
+            tick.close,
+            next_bar_open = tick.open,
+            bar_time      = tick.time,
+        )
 
         pred_cache = {
             name: {

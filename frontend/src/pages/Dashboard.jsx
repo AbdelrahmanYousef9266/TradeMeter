@@ -36,6 +36,40 @@ function LevelUpToast({ event, onDismiss }) {
     return () => clearTimeout(t)
   }, [onDismiss])
 
+  // CC Promotion toast
+  if (event.display_type === 'cc_promotion') {
+    const didPromote = event.winner === 'challenger'
+    return (
+      <div
+        onClick={onDismiss}
+        style={{
+          background: 'var(--surface-2)',
+          border: '1px solid #534AB755',
+          borderLeft: '3px solid #534AB7',
+          borderRadius: 10,
+          padding: '10px 14px',
+          minWidth: 260,
+          cursor: 'pointer',
+          animation: 'slide-in 0.25s ease-out',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+          <span style={{ fontSize: 14 }}>{didPromote ? '⚔️' : '🏆'}</span>
+          <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>
+            {event.model_name.replace(/_/g, ' ')}
+            {didPromote ? ' — Challenger promoted!' : ' — Champion retained'}
+          </span>
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+          Champion {event.champion_pnl >= 0 ? '+' : ''}{event.champion_pnl} pts
+          {' vs '}
+          Challenger {event.challenger_pnl >= 0 ? '+' : ''}{event.challenger_pnl} pts
+        </div>
+      </div>
+    )
+  }
+
+  // Level-up toast (default)
   const RANK_COLORS = {
     Rookie: '#6b7280', Apprentice: '#185FA5', Pro: '#0F6E56',
     Elite: '#534AB7', Expert: '#854F0B', Master: '#993C1D',
@@ -107,6 +141,9 @@ export default function Dashboard() {
         <span style={{ fontSize: 16, fontWeight: 500 }}>TradeMeter</span>
         <nav style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
           <NTStatusBadge />
+          <Link to="/champion-challenger" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+            ⚔️ C/C
+          </Link>
           <Link to="/settings" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
             Settings
           </Link>

@@ -119,6 +119,10 @@ export function useWebSocket() {
           }
 
           if (msg.type === 'level_up') pushLevelUp(msg)
+
+          if (msg.type === 'cc_promotion') {
+            pushLevelUp({ ...msg, id: Date.now(), display_type: 'cc_promotion' })
+          }
         } catch (err) {
           console.error('[WS] parse error:', err)
         }

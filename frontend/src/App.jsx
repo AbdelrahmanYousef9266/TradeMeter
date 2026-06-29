@@ -2,11 +2,12 @@ import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import useStore from './store'
 import api from './services/api'
-import Login         from './pages/Login'
-import Connect       from './pages/Connect'
-import Dashboard     from './pages/Dashboard'
-import Settings      from './pages/Settings'
-import ModelSettings from './pages/ModelSettings'
+import Login                from './pages/Login'
+import Connect              from './pages/Connect'
+import Dashboard            from './pages/Dashboard'
+import Settings             from './pages/Settings'
+import ModelSettings        from './pages/ModelSettings'
+import ChampionChallenger   from './pages/ChampionChallenger'
 
 function Protected({ children }) {
   const { user, setUser } = useStore()
@@ -58,6 +59,7 @@ function App() {
         <Route path="/dashboard" element={<Protected><Dashboard /></Protected>} />
         <Route path="/settings" element={<Protected><Settings /></Protected>} />
         <Route path="/models/:modelName" element={<Protected><ModelSettings /></Protected>} />
+        <Route path="/champion-challenger" element={<Protected><ChampionChallenger /></Protected>} />
 
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
       </Routes>

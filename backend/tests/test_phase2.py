@@ -104,10 +104,12 @@ def test_feature_engine_warmup():
     assert isinstance(result, dict)
 
     expected_keys = {
-        "rsi_14", "ema_9", "ema_21", "ema_50",
-        "macd", "macd_signal", "atr_14",
-        "volume_delta", "bar_range", "close_position",
-    }
+    "rsi_14", "ema_9", "ema_21", "ema_50",
+    "macd", "macd_signal", "atr_14",
+    "volume_delta", "bar_range", "close_position",
+    "vwap", "vwap_distance", "vwap_cross",
+    "session_minutes", "session_phase", "is_power_hour",
+}
     assert set(result.keys()) == expected_keys
 
 

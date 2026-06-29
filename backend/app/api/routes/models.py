@@ -354,5 +354,8 @@ def _validate_model_name(name: str) -> None:
 
 
 def _get_model(pipeline, name: str):
-    """Return the model object (handles both personality models and personal)."""
-    return pipeline.models.get(name) or pipeline.personal
+    """Return the Champion model object (or personal model)."""
+    if name == "personal":
+        return pipeline.personal
+    cc = pipeline.cc_models.get(name)
+    return cc._champion_model_obj if cc else None

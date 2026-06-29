@@ -33,4 +33,8 @@ export const getHistory            = (params) => api.get('/market/history',     
 export const getPredictionsHistory = (params) => api.get('/predictions/history', { params })
 export const getLatestPredictions  = ()       => api.get('/predictions/latest')
 
+export const getCCStatus    = ()     => api.get('/cc')
+export const getModelCC     = (name) => api.get(`/cc/${name}`)
+export const forceEvaluation = (name) => api.post(`/cc/${name}/evaluate`)
+
 export default api

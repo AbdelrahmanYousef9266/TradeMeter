@@ -148,19 +148,29 @@ export default function ModelCard({ modelName, signal, levelInfo }) {
         ))}
       </div>
 
-      {/* Row 4: tune link */}
-      <Link
-        to={`/models/${modelName}`}
-        style={{
-          fontSize: 11, color: 'var(--text-secondary)',
-          display: 'flex', alignItems: 'center', gap: 4,
-          paddingTop: 6, borderTop: '1px solid var(--border-subtle)',
-        }}
-        onMouseEnter={e => e.currentTarget.style.color = 'var(--accent)'}
-        onMouseLeave={e => e.currentTarget.style.color = 'var(--text-secondary)'}
-      >
-        Tune behavior ↗
-      </Link>
+      {/* Row 4: tune link + CC indicator */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        paddingTop: 6, borderTop: '1px solid var(--border-subtle)',
+      }}>
+        <Link
+          to={`/models/${modelName}`}
+          style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 4 }}
+          onMouseEnter={e => e.currentTarget.style.color = 'var(--accent)'}
+          onMouseLeave={e => e.currentTarget.style.color = 'var(--text-secondary)'}
+        >
+          Tune behavior ↗
+        </Link>
+        {!isPersonal && (
+          <Link
+            to="/champion-challenger"
+            style={{ fontSize: 10, color: 'var(--text-tertiary)', opacity: 0.7 }}
+            title="View Champion/Challenger status"
+          >
+            ⚔️ C/C
+          </Link>
+        )}
+      </div>
     </div>
   )
 }

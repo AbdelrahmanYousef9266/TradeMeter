@@ -11,6 +11,7 @@ export default defineConfig({
       '/market':      'http://localhost:8000',
       '/predictions': 'http://localhost:8000',
       '/settings':    'http://localhost:8000',
+      '/cc':          'http://localhost:8000',
       '/ws':          { target: 'ws://localhost:8000', ws: true },
     },
   },
