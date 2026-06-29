@@ -19,6 +19,8 @@ class MomentumModel(BasePersonalityModel):
             "max_signals_per_session": 20,
             "signal_mode": "balanced",
             "learning_rate": 0.05,
+            "atr_stop_mult":   1.5,    # medium stop
+            "atr_target_mult": 3.0,    # 2:1 R:R
         }
 
     def predict(self, features: dict, last_close: float, **kwargs) -> ModelPrediction:
@@ -39,5 +41,15 @@ class MomentumModel(BasePersonalityModel):
             signal = "SELL"
         else:
             signal = "HOLD"
+
+        # Lunch chop reduces trend reliability
+        session_minutes = features.get("session_minutes", 200)
+        if 120 <= session_minutes <= 270:
+            confidence *= 0.80
+
+        # Strong VWAP separation confirms directional momentum
+        vwap_distance = features.get("vwap_distance", 0.0)
+        if abs(vwap_distance) > 0.002:
+            confidence = min(confidence * 1.15, 0.99)
 
         return self._apply_gates(signal, confidence, p_up, p_down, ph, pl)

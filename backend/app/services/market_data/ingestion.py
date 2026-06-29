@@ -1,20 +1,25 @@
 """
-Redis Streams consumer — reads from 'market:raw', writes bar closes to
-TimescaleDB, computes features, runs all 10 ML models, and publishes the
-enriched bar payload to Redis pub/sub for the WebSocket broadcaster.
+Redis Streams consumer — reads from 'market:raw', runs the ML pipeline on bar
+closes only, and publishes enriched payloads to Redis pub/sub for the WebSocket
+broadcaster.
 
-Flow per bar:
+Message types:
+  tick     → publish lightweight price update (pub/sub already done by redis.publish_tick)
+  bar close → write to DB, compute features, run ML, publish type:"bar" with predictions
+
+Flow per bar close:
   1. Parse stream entry → Tick
-  2. Write bar close to TimescaleDB (ticks table)
-  3. Compute 10 features via FeatureEngine
-  4. If past warmup (features not None):
-     a. If prev bar exists: call learn_all() so models learn from last bar's label
-     b. Call predict_all() on current features
-     c. Store predictions in TimescaleDB
-     d. Cache predictions in Redis
-     e. Publish enriched bar to pub/sub live:{user_id}
-     f. Publish any level-up events as separate messages
-  5. Update per-user state for next bar
+  2. Write bar close to TimescaleDB (non-fatal on failure)
+  3. Compute features via FeatureEngine
+  4. If in warmup: publish type:"tick" so chart price updates but no ML candle yet
+  5. Get or create per-user MLPipeline
+  6. Learn from previous bar (if prev predictions exist)
+  7. Predict on current bar
+  8. Publish type:"bar" with models + levels (BEFORE DB writes)
+  9. Cache predictions in Redis
+  10. Store predictions in TimescaleDB (non-fatal)
+  11. Publish any level-up events
+  12. Save state for next bar's learn call
 """
 
 import asyncio
@@ -101,106 +106,172 @@ async def _process_entry(
         logger.warning("Ingestion: bad stream entry: %s | %s", exc, fields)
         return
 
-    # ── 2. Write bar closes to DB (skip raw ticks) ───────────────────────
-    if tick.bar_type == "tick":
+    # ── 2. TICK GATE — must be first, nothing ML-related runs past here for ticks ──
+    #
+    # Ticks are already published to pub/sub by redis.publish_tick before they
+    # enter the stream.  The ingestion pipeline has nothing to do with them.
+    # Case-insensitive so "Tick" / "TICK" variants from NinjaTrader also match.
+    if tick.bar_type.lower() == "tick":
         return
 
+    # ────────────────────────────────────────────────────────────────────────
+    # Everything below ONLY runs for bar closes (bar_type != "tick")
+    # ────────────────────────────────────────────────────────────────────────
+
+    user_id = str(tick.user_id)
+
+    # Compact bar dict reused in all outgoing payloads
+    _bar = {
+        "open":   tick.open,
+        "high":   tick.high,
+        "low":    tick.low,
+        "close":  tick.close,
+        "volume": tick.volume,
+    }
+
+    # ── 3. Write bar close to DB ──────────────────────────────────────────
     try:
         async with db_pool.acquire() as conn:
             await write_tick_to_db(conn, tick)
     except asyncpg.PostgresError as exc:
-        logger.error("Ingestion: DB write failed: %s", exc)
-        return
+        # Non-fatal — ML pipeline and WebSocket publish still run
+        logger.error("Ingestion: DB write failed (continuing to ML): %s", exc)
 
-    # ── 3. Compute features ───────────────────────────────────────────────
+    # ── 4. Compute features ───────────────────────────────────────────────
+    engine = get_engine(user_id)
     try:
-        features = get_engine(str(tick.user_id)).update(tick)
+        features = engine.update(tick)
     except Exception as exc:
         logger.error("Ingestion: feature computation failed: %s", exc)
         return
 
     if features is None:
-        # Still in 50-bar warmup period — nothing more to do
+        # Still in warmup (< 50 bars). Publish as type "tick" so the frontend
+        # updates the live price line but does NOT create a new ML chart candle
+        # or update model cards. Include warmup progress so the chart can show
+        # a live progress bar instead of "Waiting for bar data".
+        await redis_client.publish(f"live:{user_id}", json.dumps({
+            "type": "tick",
+            "time": tick.time.isoformat(),
+            "bar":  _bar,
+            "warmup": {
+                "bars_received": engine.bar_count,
+                "bars_needed":   50,
+                "warming_up":    True,
+            },
+        }))
         return
 
-    # ── 4. ML pipeline ────────────────────────────────────────────────────
-    user_id = str(tick.user_id)
-
+    # ── 5. Get or create per-user ML pipeline ────────────────────────────
     try:
         async with db_pool.acquire() as conn:
             pipeline = await get_pipeline(user_id, conn)
+    except Exception as exc:
+        logger.error("Ingestion: get_pipeline failed for user %s: %s", user_id, exc)
+        return
 
-        prev = _bar_state.get(user_id)
-
-        # 4a. Learn from the PREVIOUS bar now that we have the next close as label
-        level_up_events = []
-        if prev and prev.get("predictions"):
+    # ── 6. Learn from previous bar (Level 3 — trade outcome based) ───────
+    prev = _bar_state.get(user_id)
+    level_up_events = []
+    if prev and prev.get("predictions"):
+        try:
             async with db_pool.acquire() as conn:
                 level_up_events = await pipeline.learn_all(
                     features=prev["features"],
                     actual_close=tick.close,
                     prev_close=prev["close"],
                     predictions=prev["predictions"],
+                    bar_high=tick.high,
+                    bar_low=tick.low,
+                    bar_time=tick.time,
                     db_conn=conn,
                     redis_client=redis_client,
                 )
+        except Exception as exc:
+            logger.error("Ingestion: learn_all failed for user %s: %s", user_id, exc)
 
-        # 4b. Predict for current bar
+    # ── 7–12. Predict → Open trades → Publish → Cache → Store → Level-ups ─
+    try:
+        # 7. Predict on current bar
         predictions = await pipeline.predict_all(features, tick.close)
 
-        # 4c. Store predictions
-        async with db_pool.acquire() as conn:
-            await _store_predictions(conn, tick, predictions)
+        # Open simulated trades for non-HOLD signals (Level 3)
+        # Using current bar open as proxy for next bar open (realistic fill)
+        atr = features.get("atr_14", 1.0)
+        for name, pred in predictions.items():
+            if pred.signal != "HOLD":
+                model = pipeline.models.get(name) or pipeline.personal
+                model_settings = model.get_settings()
+                pipeline.trade_manager.open_trade(
+                    model_name      = name,
+                    signal          = pred.signal,
+                    next_bar_open   = tick.open,
+                    atr             = atr,
+                    atr_stop_mult   = model_settings.get("atr_stop_mult",   1.5),
+                    atr_target_mult = model_settings.get("atr_target_mult", 3.0),
+                    confidence      = pred.confidence,
+                    features        = features,
+                    bar_time        = tick.time,
+                )
 
-        # 4d. Cache predictions in Redis
         pred_cache = {
             name: {
                 "signal":         p.signal,
-                "confidence":     p.confidence,
-                "direction_up":   p.direction_up,
-                "direction_down": p.direction_down,
-                "predicted_high": p.predicted_high,
-                "predicted_low":  p.predicted_low,
+                "confidence":     round(p.confidence, 3),
+                "direction_up":   round(p.direction_up, 3),
+                "direction_down": round(p.direction_down, 3),
+                "predicted_high": round(p.predicted_high, 2),
+                "predicted_low":  round(p.predicted_low, 2),
             }
             for name, p in predictions.items()
         }
-        await cache_latest_predictions(redis_client, user_id, pred_cache)
 
-        # 4e. Publish enriched bar to pub/sub
         levels_dict = {
             name: tracker.to_dict()
             for name, tracker in pipeline.xp_trackers.items()
         }
-        ws_payload = json.dumps({
+
+        session_pnl = pipeline.trade_manager.get_session_pnl()
+
+        # 8. Publish enriched bar BEFORE DB writes — WS must not be blocked by DB.
+        await redis_client.publish(f"live:{user_id}", json.dumps({
             "type":     "bar",
             "time":     tick.time.isoformat(),
-            "bar": {
-                "symbol": tick.symbol,
-                "open":   tick.open,
-                "high":   tick.high,
-                "low":    tick.low,
-                "close":  tick.close,
-                "volume": tick.volume,
-                "bar_type": tick.bar_type,
-            },
+            "bar":      _bar,
             "features": features,
             "models":   pred_cache,
             "levels":   levels_dict,
-        })
-        await redis_client.publish(f"live:{user_id}", ws_payload)
+            "warmup":   None,   # signals to frontend: past warmup, predictions are live
+            "session_pnl": {
+                name: {
+                    "points":  round(pnl, 2),
+                    "dollars": round(pnl * 5.0, 2),
+                }
+                for name, pnl in session_pnl.items()
+            },
+        }))
 
-        # 4f. Publish level-up events as separate messages
+        # 9. Cache latest predictions in Redis
+        await cache_latest_predictions(redis_client, user_id, pred_cache)
+
+        # 10. Store predictions in DB (non-fatal)
+        try:
+            async with db_pool.acquire() as conn:
+                await _store_predictions(conn, tick, predictions)
+        except Exception as exc:
+            logger.error("Ingestion: _store_predictions failed for user %s: %s", user_id, exc)
+
+        # 11. Publish level-up events as separate messages
         for event in level_up_events:
-            lue_payload = json.dumps({
+            await redis_client.publish(f"live:{user_id}", json.dumps({
                 "type":       "level_up",
                 "model_name": event.model_name,
                 "new_level":  event.new_level,
                 "new_rank":   event.new_rank,
                 "unlocked":   event.unlocked,
-            })
-            await redis_client.publish(f"live:{user_id}", lue_payload)
+            }))
 
-        # 5. Save state for next bar's learn call
+        # 12. Save state for next bar's learn call
         _bar_state[user_id] = {
             "features":    features,
             "predictions": predictions,

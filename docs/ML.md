@@ -44,22 +44,28 @@ When a user manually marks a trade outcome in the dashboard, the personal model 
 
 ## Features
 
-Ten features are computed from raw OHLCV data by `features.py` before being passed to any model:
+Sixteen features are computed from raw OHLCV data by `features.py` before being passed to any model:
 
 | Feature | Description |
 |---|---|
-| `rsi_14` | RSI(14) computed incrementally using River's rolling mean |
+| `rsi_14` | RSI(14) using Wilder's smoothing |
 | `ema_9` | Exponential moving average over 9 bars |
 | `ema_21` | Exponential moving average over 21 bars |
 | `ema_50` | Exponential moving average over 50 bars |
 | `macd` | MACD line: EMA(12) − EMA(26) |
 | `macd_signal` | Signal line: EMA(9) of MACD |
 | `atr_14` | Average True Range over 14 bars (volatility gauge) |
-| `volume_delta` | Current bar volume minus 20-bar rolling mean (normalized) |
+| `volume_delta` | Current bar volume vs 20-bar rolling mean (normalized) |
 | `bar_range` | High − Low (absolute range of current bar) |
 | `close_position` | (Close − Low) / (High − Low) — where close sits in bar's range, 0–1 |
+| `vwap` | Session VWAP price (resets 9:30 AM ET daily, typical price weighted) |
+| `vwap_distance` | (close − vwap) / vwap — how far price is from fair value |
+| `vwap_cross` | 1.0 = crossed above VWAP this bar, −1.0 = crossed below, 0.0 = no cross |
+| `session_minutes` | Minutes elapsed since 9:30 AM ET open (0 = open, 390 = close) |
+| `session_phase` | Normalized session position 0.0 (open) to 1.0 (close) |
+| `is_power_hour` | 1.0 if current bar is between 3:00–4:00 PM ET, else 0.0 |
 
-All features use River's rolling stat primitives (`EWMean`, `RollingMean`, `RollingVar`) — they update in O(1) per bar with no stored history.
+All features update in O(1) per bar with no stored history beyond a 20-bar volume window.
 
 ---
 
@@ -69,7 +75,7 @@ All features use River's rolling stat primitives (`EWMean`, `RollingMean`, `Roll
 New bar closes (NinjaTrader sends OHLCV via TCP)
       │
       ▼
-Feature engine — computes all 10 features → feature dict x
+Feature engine — computes all 16 features → feature dict x
       │
       ├──► Model 1  (Scalper)        .predict_one(x) → signal_1
       ├──► Model 2  (Momentum)       .predict_one(x) → signal_2

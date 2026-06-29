@@ -31,6 +31,10 @@ class BasePersonalityModel(ABC):
 
     name: str = "base"
 
+    # ATR multipliers — each model overrides these in _default_settings
+    DEFAULT_ATR_STOP_MULT   = 1.5   # stop = entry ± ATR × 1.5
+    DEFAULT_ATR_TARGET_MULT = 3.0   # target = entry ± ATR × 3.0 (2:1 R:R)
+
     def __init__(self) -> None:
         self.classifier     = self._build_classifier()
         self.regressor_high = self._build_regressor()
@@ -151,6 +155,37 @@ class BasePersonalityModel(ABC):
             pass
         try:
             self.regressor_low.learn_one(features, label_low)
+        except Exception:
+            pass
+        self.bar_count += 1
+
+    def learn_from_trade(self, trade) -> None:
+        """
+        Level 3 learning — called when a simulated trade closes.
+        Uses actual P&L outcome as the training signal instead of a direction label.
+
+        Timeout (scratch) skips learning — neither right nor wrong.
+        Won trade: reinforce predicted direction. Lost trade: penalize.
+        """
+        if trade.exit_reason == "timeout":
+            return
+
+        label = trade.direction_label if trade.won else 1 - trade.direction_label
+
+        # Magnitude weight (bigger P&L relative to ATR = stronger signal)
+        atr = trade.features.get("atr_14", 1.0)
+        magnitude = abs(trade.pnl_points or 0) / max(atr, 0.01)
+        weight = min(magnitude, 3.0)  # cap at 3× to prevent outlier dominance
+
+        try:
+            self.classifier.learn_one(trade.features, label)
+        except Exception:
+            pass
+        try:
+            if trade.signal == "BUY":
+                self.regressor_high.learn_one(trade.features, trade.exit_price)
+            else:
+                self.regressor_low.learn_one(trade.features, trade.exit_price)
         except Exception:
             pass
         self.bar_count += 1

@@ -1,8 +1,8 @@
-# NinjaTrader Strategy — LiveDataFeedStrategy
+# NinjaTrader Strategy — TradeMeterFeed
 
 ## What It Does
 
-LiveDataFeedStrategy is a NinjaScript strategy that runs inside NinjaTrader 8. On every completed bar it sends the OHLCV data plus your TradeMeter connection token to the TradeMeter backend over a TCP socket. Between bar closes, it also sends real-time tick updates so the dashboard price line stays live. The strategy runs on a background thread and handles reconnection automatically — NinjaTrader will never freeze or crash due to a lost connection.
+TradeMeterFeed is a NinjaScript strategy that runs inside NinjaTrader 8. On every completed bar it sends the OHLCV data plus your TradeMeter connection token to the TradeMeter backend over a TCP socket. Between bar closes, it also sends real-time tick updates so the dashboard price line stays live. The strategy runs on a background thread and handles reconnection automatically — NinjaTrader will never freeze or crash due to a lost connection.
 
 The strategy is **data-only**: it never places, modifies, or cancels any orders.
 

@@ -27,12 +27,17 @@ class Settings(BaseSettings):
     model_snapshot_interval: int = 100
     drift_accuracy_threshold: float = 0.60
 
+    # Frontend (for OAuth redirect after callback)
+    frontend_url: str = "http://localhost:5173"
+
     # Environment
     env: str = "development"
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = {
+        "env_file": [".env", "../.env"],  # backend/.env first, then TradeMeter/.env
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
 
 settings = Settings()

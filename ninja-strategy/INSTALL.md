@@ -10,7 +10,7 @@
 
 ## Step 1 — Copy the Strategy File
 
-Copy `LiveDataFeedStrategy.cs` to NinjaTrader's custom strategies folder:
+Copy `TradeMeterFeed.cs` to NinjaTrader's custom strategies folder:
 
 ```
 C:\Users\<YourWindowsUsername>\Documents\NinjaTrader 8\bin\Custom\Strategies\
@@ -18,7 +18,7 @@ C:\Users\<YourWindowsUsername>\Documents\NinjaTrader 8\bin\Custom\Strategies\
 
 The full default path is usually:
 ```
-C:\Users\YourName\Documents\NinjaTrader 8\bin\Custom\Strategies\LiveDataFeedStrategy.cs
+C:\Users\YourName\Documents\NinjaTrader 8\bin\Custom\Strategies\TradeMeterFeed.cs
 ```
 
 Do **not** put it in a subfolder — NinjaTrader expects strategy files directly in the `Strategies\` directory.
@@ -29,13 +29,13 @@ Do **not** put it in a subfolder — NinjaTrader expects strategy files directly
 
 1. Open NinjaTrader 8
 2. In the top menu bar: **Tools → Edit NinjaScript → Strategy...**
-3. The NinjaScript Editor window opens. In the left panel you should see `LiveDataFeedStrategy` listed under **Strategies**
-4. Double-click `LiveDataFeedStrategy` to open it
+3. The NinjaScript Editor window opens. In the left panel you should see `TradeMeterFeed` listed under **Strategies**
+4. Double-click `TradeMeterFeed` to open it
 5. Press **F5** (or click the **Compile** button in the toolbar)
 6. In the output panel at the bottom, you should see:
 
    ```
-   Compilation succeeded for Strategy 'LiveDataFeedStrategy'
+   Compilation succeeded for Strategy 'TradeMeterFeed'
    ```
 
    If you see errors, check the [Troubleshooting section in README.md](README.md#troubleshooting).
@@ -47,7 +47,7 @@ Do **not** put it in a subfolder — NinjaTrader expects strategy files directly
 1. Open a **MES** (Micro E-mini S&P 500) chart in NinjaTrader — any bar type works (1 min, 5 min, tick, etc.)
 2. Right-click anywhere on the chart
 3. Click **Strategies → Add Strategy...**
-4. In the strategy list, select **LiveDataFeedStrategy**
+4. In the strategy list, select **TradeMeterFeed**
 5. The parameter dialog opens — **do not click OK yet**, configure parameters first (Step 4)
 
 ---
@@ -126,7 +126,7 @@ TradeMeter: Token not set — data not sent
 
 You can pause data streaming at any time by unchecking **Send Data To TradeMeter** in the strategy parameters. This keeps the strategy on the chart (and the TCP connection alive) but stops sending data. Re-check the box to resume.
 
-To fully remove: right-click the chart → Strategies → Remove Strategy → select LiveDataFeedStrategy.
+To fully remove: right-click the chart → Strategies → Remove Strategy → select TradeMeterFeed.
 
 ---
 

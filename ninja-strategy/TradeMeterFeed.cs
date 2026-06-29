@@ -18,7 +18,7 @@ using NinjaTrader.NinjaScript.Indicators;
 
 namespace NinjaTrader.NinjaScript.Strategies
 {
-    public class LiveDataFeedStrategy : Strategy
+    public class TradeMeterFeed : Strategy
     {
         // ── Private state ───────────────────────────────────────────────────────
         private TcpClient    _tcpClient;
@@ -38,7 +38,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (State == State.SetDefaults)
             {
                 Description                  = "Streams live OHLCV bar data to the TradeMeter backend via TCP. Data-only — places no orders.";
-                Name                         = "LiveDataFeedStrategy";
+                Name                         = "TradeMeterFeed";
                 Calculate                    = Calculate.OnEachTick;
                 BarsRequiredToTrade          = 1;
                 IsExitOnSessionCloseStrategy = false;
@@ -269,7 +269,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (CurrentBar < 1)
                 return;
 
-            SendBarData(GetBarTypeString(), Time[1], Open[1], High[1], Low[1], Close[1], Volume[1],
+            SendBarData(GetBarTypeString(), Time[1], Open[1], High[1], Low[1], Close[1], (long)Volume[1],
                         logSend: true);
         }
 
@@ -293,7 +293,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 High[0],
                 Low[0],
                 marketDataUpdate.Price,
-                Volume[0],
+                (long)Volume[0],
                 logSend: false);
         }
 

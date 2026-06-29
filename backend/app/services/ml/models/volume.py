@@ -22,4 +22,6 @@ class VolumeModel(BasePersonalityModel):
             "volume_spike_threshold": 1.8,
             "delta_imbalance_cutoff": 0.60,
             "lookback_window": 20,
+            "atr_stop_mult":   1.5,
+            "atr_target_mult": 3.0,
         }

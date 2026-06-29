@@ -19,4 +19,6 @@ class ConservativeModel(BasePersonalityModel):
             "max_signals_per_session": 8,
             "signal_mode": "conservative",
             "learning_rate": 0.03,
+            "atr_stop_mult":   0.75,   # very tight stop
+            "atr_target_mult": 1.5,    # modest target
         }

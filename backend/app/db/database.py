@@ -26,28 +26,48 @@ async def get_db(request: Request):
         yield conn
 
 
-async def init_db(pool: asyncpg.Pool) -> None:
+async def upsert_user(conn, email: str, google_id: str) -> dict:
     """
-    Execute the initial migration SQL.
-    Uses IF NOT EXISTS throughout so it is safe to run on every startup.
+    Insert a new user or update google_id if the email already exists.
+    Returns the full user row as a dict.
     """
-    migrations_dir = os.path.join(os.path.dirname(__file__), "migrations")
-    sql_path = os.path.join(migrations_dir, "001_initial.sql")
+    row = await conn.fetchrow(
+        """INSERT INTO users (email, google_id)
+           VALUES ($1, $2)
+           ON CONFLICT (email) DO UPDATE
+               SET google_id = EXCLUDED.google_id
+           RETURNING *""",
+        email, google_id,
+    )
+    return dict(row)
 
+
+async def _run_migration(pool: asyncpg.Pool, sql_path: str) -> None:
+    """Execute a single migration file, one statement per connection."""
     with open(sql_path, encoding="utf-8") as fh:
         sql = fh.read()
 
-    async with pool.acquire() as conn:
-        # Split on semicolons so we can execute each statement individually —
-        # asyncpg's execute() handles multi-statement strings but some
-        # TimescaleDB DDL (SELECT create_hypertable) needs isolation.
-        statements = [s.strip() for s in sql.split(";") if s.strip()]
-        for stmt in statements:
+    statements = [s.strip() for s in sql.split(";") if s.strip()]
+    for stmt in statements:
+        async with pool.acquire() as conn:
             try:
                 await conn.execute(stmt)
             except asyncpg.PostgresError as exc:
-                # Log but don't re-raise — most errors here are
-                # "already exists" races on concurrent startups.
                 logger.warning("Migration statement skipped: %s | %s", exc, stmt[:80])
+
+
+async def init_db(pool: asyncpg.Pool) -> None:
+    """
+    Execute all migration SQL files in order.
+    Each file is idempotent (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS).
+    """
+    migrations_dir = os.path.join(os.path.dirname(__file__), "migrations")
+
+    for filename in sorted(os.listdir(migrations_dir)):
+        if not filename.endswith(".sql"):
+            continue
+        sql_path = os.path.join(migrations_dir, filename)
+        await _run_migration(pool, sql_path)
+        logger.info("Migration applied: %s", filename)
 
     logger.info("Database schema initialised")

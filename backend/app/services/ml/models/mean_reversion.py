@@ -20,6 +20,8 @@ class MeanReversionModel(BasePersonalityModel):
             "signal_mode": "balanced",
             "rsi_overbought": 70,
             "rsi_oversold": 30,
+            "atr_stop_mult":   1.0,    # tight — mean rev should work fast or not at all
+            "atr_target_mult": 2.0,
         }
 
     def predict(self, features: dict, last_close: float, **kwargs) -> ModelPrediction:
@@ -37,5 +39,14 @@ class MeanReversionModel(BasePersonalityModel):
             signal = "SELL"
         else:
             signal = "HOLD"
+
+        # VWAP confirmation: mean reversion against the prevailing VWAP bias is risky
+        vwap_dist = features.get("vwap_distance", 0.0)
+        if signal == "BUY" and vwap_dist > 0.001:
+            # Price already above VWAP — buying into strength undermines mean reversion thesis
+            confidence *= 0.7
+        if signal == "SELL" and vwap_dist < -0.001:
+            # Price already below VWAP — selling into weakness undermines mean reversion thesis
+            confidence *= 0.7
 
         return self._apply_gates(signal, confidence, p_up, p_down, ph, pl)

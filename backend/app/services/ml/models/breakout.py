@@ -20,6 +20,8 @@ class BreakoutModel(BasePersonalityModel):
             "signal_mode": "balanced",
             "volume_spike_threshold": 1.8,
             "atr_multiplier": 1.5,
+            "atr_stop_mult":   2.0,    # wide stop — breakouts need room
+            "atr_target_mult": 5.0,    # breakouts can run far
         }
 
     def predict(self, features: dict, last_close: float, **kwargs) -> ModelPrediction:
@@ -43,5 +45,14 @@ class BreakoutModel(BasePersonalityModel):
             signal = "BUY"
         else:
             signal = "SELL"
+
+        # Boost confidence during high-conviction breakout time windows:
+        # opening range (first 30 min) and power hour (3:00–4:00 PM ET)
+        session_minutes = features.get("session_minutes", 200)
+        is_power_hour   = features.get("is_power_hour",   0.0)
+        is_opening_range = 1.0 if session_minutes <= 30 else 0.0
+
+        if signal != "HOLD" and (is_power_hour or is_opening_range):
+            confidence = min(confidence * 1.2, 0.99)
 
         return self._apply_gates(signal, confidence, p_up, p_down, ph, pl)

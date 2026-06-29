@@ -1,12 +1,12 @@
 """
 ML pipeline orchestrator.
 
-One MLPipeline instance per user.  Holds model instances, XP trackers, and drift
-detectors for that user.  Created lazily on first bar for that user; persisted
-across requests via the module-level _pipelines dict.
+One MLPipeline instance per user.  Holds model instances, XP trackers, drift
+detectors, and the Level-3 TradeManager for that user.  Created lazily on first
+bar; persisted across requests via the module-level _pipelines dict.
 
 predict_all() → sync River calls, async only for Redis
-learn_all()   → sync River calls + async DB/Redis persistence
+learn_all()   → update open trades, learn from closed ones, persist results
 """
 
 import asyncio
@@ -31,6 +31,7 @@ from app.services.ml.models.contrarian    import ContrarianModel
 from app.services.ml.models.personal      import PersonalModel
 from app.services.ml.xp                  import XPTracker, LevelUpEvent, level_to_rank
 from app.services.ml.drift               import DriftDetector
+from app.services.ml.trade_tracker       import TradeManager
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ ALL_MODEL_NAMES = list(MODEL_REGISTRY.keys()) + ["personal"]
 # ── Pipeline class ─────────────────────────────────────────────────────────
 
 class MLPipeline:
-    """Per-user ML state: models, XP trackers, drift detectors."""
+    """Per-user ML state: models, XP trackers, drift detectors, trade manager."""
 
     def __init__(self, user_id: str, initial_levels: dict) -> None:
         self.user_id = user_id
@@ -81,8 +82,10 @@ class MLPipeline:
             for name in ALL_MODEL_NAMES
         }
 
+        # Level 3 trade simulation — one manager per user
+        self.trade_manager = TradeManager(user_id)
+
         self.bar_count = 0
-        self.prev_pnl  = 0.0
 
     # ── Prediction ────────────────────────────────────────────────────────
 
@@ -92,25 +95,20 @@ class MLPipeline:
         last_close: float,
     ) -> dict[str, ModelPrediction]:
         """
-        Run all 10 models synchronously; the async wrapper is for call-site
-        convenience (callers are already async for DB/Redis work).
-
+        Run all 9 models synchronously.
         Contrarian receives other predictions first.
         Personal model receives all 8 personality predictions + level ranks.
         """
         predictions: dict[str, ModelPrediction] = {}
 
-        # 7 non-contrarian models first
         for name, model in self.models.items():
             if name != "contrarian":
                 predictions[name] = model.predict(features, last_close)
 
-        # Contrarian with majority context
         predictions["contrarian"] = self.models["contrarian"].predict(
             features, last_close, other_predictions=predictions
         )
 
-        # Personal blends all 8
         predictions["personal"] = self.personal.predict(
             features, predictions, self.level_ranks
         )
@@ -121,84 +119,68 @@ class MLPipeline:
 
     async def learn_all(
         self,
-        features:        dict,
-        actual_close:    float,
-        prev_close:      float,
-        predictions:     dict[str, ModelPrediction],
-        db_conn:         asyncpg.Connection,
-        redis_client:    aioredis.Redis,
+        features:     dict,
+        actual_close: float,
+        prev_close:   float,
+        predictions:  dict[str, ModelPrediction],
+        bar_high:     float,
+        bar_low:      float,
+        bar_time:     object,
+        db_conn:      asyncpg.Connection,
+        redis_client: aioredis.Redis,
     ) -> list[LevelUpEvent]:
         """
-        Called when the NEXT bar closes.
-        Updates model weights, awards XP, checks for level-ups, persists results.
-        """
-        actual_direction = 1 if actual_close > prev_close else 0
-        curr_pnl = (actual_close - prev_close) / prev_close if prev_close else 0.0
+        Level 3 learning — called on every bar close.
 
-        # Labels for regression targets (approximate from close)
-        label_high = actual_close * 1.002
-        label_low  = actual_close * 0.998
+        Two steps:
+        1. Update all open simulated trades with this bar's H/L/C (check target/stop/timeout).
+        2. For each trade that closed, call learn_from_trade() and award XP based on P&L.
+
+        Parameters features/prev_close/predictions are kept for API stability but
+        are no longer used directly — learning now comes from trade outcomes.
+        """
+        # ── 1. Update all open trades ──────────────────────────────────────
+        closed_trades = self.trade_manager.update_all(
+            bar_high, bar_low, actual_close, bar_time
+        )
 
         level_up_events: list[LevelUpEvent] = []
 
-        # ── Personality models ─────────────────────────────────────────
-        correct_by_model: dict[str, bool] = {}
+        # ── 2. Learn from closed trades ────────────────────────────────────
+        for trade in closed_trades:
+            model = self.models.get(trade.model_name) or self.personal
+            if model:
+                model.learn_from_trade(trade)
 
-        for name, model in self.models.items():
-            pred = predictions.get(name)
-            if pred is None:
-                continue
+            tracker = self.xp_trackers.get(trade.model_name)
+            if tracker:
+                if trade.won:
+                    xp_delta = 10 + int(abs(trade.pnl_points or 0) * 2)
+                elif trade.exit_reason == "timeout":
+                    xp_delta = 1   # scratch — minimal XP for the bar
+                else:
+                    xp_delta = -5  # loss penalty
 
-            model.learn(features, actual_direction, label_high, label_low)
+                tracker.xp = max(0, tracker.xp + xp_delta)
+                tracker.bars_learned += 1
 
-            correct = (pred.direction_up > 0.5) == bool(actual_direction)
-            correct_by_model[name] = correct
+                event = tracker._check_level_up()
+                if event:
+                    self.level_ranks[trade.model_name] = event.new_rank
+                    level_up_events.append(event)
 
-            if self.drift_detectors[name].update(correct):
-                logger.info("Drift detected for %s user=%s — resetting weights", name, self.user_id)
-                model.reset()
-                self.xp_trackers[name].streak = 0
-                try:
-                    await redis_client.publish(
-                        f"live:{self.user_id}",
-                        json.dumps({"type": "drift", "model": name}),
-                    )
-                except Exception:
-                    pass
-
-            event = self.xp_trackers[name].award(
-                pred.direction_up, actual_direction, self.prev_pnl, curr_pnl
-            )
-            if event:
-                self.level_ranks[name] = event.new_rank
-                level_up_events.append(event)
-
-        # ── Personal model ─────────────────────────────────────────────
-        pred_personal = predictions.get("personal")
-        if pred_personal:
-            self.personal.learn_from_bar(features, actual_direction, correct_by_model)
-
-            correct_p = (pred_personal.direction_up > 0.5) == bool(actual_direction)
-            if self.drift_detectors["personal"].update(correct_p):
-                self.personal.reset()
-                self.xp_trackers["personal"].streak = 0
-
-            event = self.xp_trackers["personal"].award(
-                pred_personal.direction_up, actual_direction, self.prev_pnl, curr_pnl
-            )
-            if event:
-                self.level_ranks["personal"] = event.new_rank
-                level_up_events.append(event)
-
-        # ── Persist levels to DB ───────────────────────────────────────
+        # ── 3. Persist levels ──────────────────────────────────────────────
         await self._save_levels(db_conn)
 
-        # ── MLflow snapshot every N bars ───────────────────────────────
+        # ── 4. Save closed trades to DB (non-fatal) ────────────────────────
+        for trade in closed_trades:
+            await self._save_trade(db_conn, trade)
+
+        # ── 5. MLflow snapshot every N bars ───────────────────────────────
         self.bar_count += 1
         if self.bar_count % settings.model_snapshot_interval == 0:
             await self._snapshot_mlflow()
 
-        self.prev_pnl = curr_pnl
         return level_up_events
 
     # ── Persistence ───────────────────────────────────────────────────────
@@ -221,18 +203,42 @@ class MLPipeline:
                 tracker.level, tracker.xp, tracker.streak, tracker.bars_learned,
             )
 
+    async def _save_trade(self, db_conn: asyncpg.Connection, trade) -> None:
+        """Update the predictions row with P&L outcome from the closed trade."""
+        try:
+            await db_conn.execute(
+                """UPDATE predictions
+                   SET actual_outcome = $1,
+                       pnl_points     = $2,
+                       pnl_dollars    = $3,
+                       exit_reason    = $4,
+                       bars_held      = $5
+                   WHERE user_id    = $6
+                     AND model_name = $7
+                     AND time       = $8""",
+                "win" if trade.won else "loss",
+                trade.pnl_points,
+                trade.pnl_dollars,
+                trade.exit_reason,
+                trade.bars_held,
+                _uuid.UUID(trade.user_id),
+                trade.model_name,
+                trade.entry_time,
+            )
+        except Exception as exc:
+            logger.warning("_save_trade failed (non-fatal): %s", exc)
+
     async def _snapshot_mlflow(self) -> None:
         try:
             import mlflow
-            import pickle
 
             mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
             with mlflow.start_run(run_name=f"trademeter_{self.user_id}_bar{self.bar_count}"):
                 for name, model in self.models.items():
                     tracker = self.xp_trackers[name]
                     mlflow.log_metrics({
-                        f"{name}_level":    tracker.level,
-                        f"{name}_bars":     tracker.bars_learned,
+                        f"{name}_level": tracker.level,
+                        f"{name}_bars":  tracker.bars_learned,
                     })
                     mlflow.log_param(f"{name}_rank", self.level_ranks[name])
         except Exception as exc:
@@ -247,18 +253,32 @@ _pipelines: dict[str, MLPipeline] = {}
 async def get_pipeline(user_id: str, db_conn: asyncpg.Connection) -> MLPipeline:
     """
     Return existing pipeline for user or create a fresh one.
-    On creation, loads existing XP levels from TimescaleDB.
+    Always returns a valid MLPipeline — never raises.
+    On creation, attempts to load XP levels from DB; uses empty defaults on failure.
     """
     if user_id in _pipelines:
         return _pipelines[user_id]
 
-    rows = await db_conn.fetch(
-        """SELECT model_name, level, xp, streak, bars_learned
-           FROM   model_levels
-           WHERE  user_id = $1""",
-        _uuid.UUID(user_id),
-    )
-    initial_levels = {r["model_name"]: dict(r) for r in rows}
+    try:
+        rows = await db_conn.fetch(
+            """SELECT model_name, level, xp, streak, bars_learned
+               FROM   model_levels
+               WHERE  user_id = $1""",
+            _uuid.UUID(user_id),
+        )
+        initial_levels = {
+            r["model_name"]: {
+                "level":        r["level"],
+                "xp":           r["xp"],
+                "streak":       r["streak"],
+                "bars_learned": r["bars_learned"],
+            }
+            for r in rows
+        }
+    except Exception as exc:
+        logger.warning("get_pipeline: could not load model levels for %s (%s) — using defaults", user_id, exc)
+        initial_levels = {}
+
     pipeline = MLPipeline(user_id, initial_levels)
     _pipelines[user_id] = pipeline
     logger.info("ML pipeline created for user %s", user_id)

@@ -24,8 +24,14 @@ async def get_redis(request: Request) -> aioredis.Redis:
 
 async def publish_tick(client: aioredis.Redis, user_id: str, tick: dict) -> None:
     """
-    Write a tick to the Redis Stream 'market:raw' and publish to the
-    pub/sub channel 'live:{user_id}' for connected WebSocket clients.
+    Write a message to the Redis Stream 'market:raw' (all messages) and, for
+    real-time tick updates only, also publish to the pub/sub channel
+    'live:{user_id}' so the dashboard price line stays live between bar closes.
+
+    Bar-close messages are NOT published to pub/sub here — the ingestion
+    pipeline reads them from the stream, runs ML, and publishes a single
+    enriched payload.  Splitting responsibilities this way prevents the
+    duplicate-bar problem caused by two separate pub/sub publishes per close.
     """
     entry = {
         "user_id":   user_id,
@@ -40,21 +46,23 @@ async def publish_tick(client: aioredis.Redis, user_id: str, tick: dict) -> None
     }
     await client.xadd("market:raw", entry, maxlen=10_000, approximate=True)
 
-    # Pub/sub publish for WebSocket forwarding — Phase 3 will enrich with predictions.
-    payload = {
-        "type": "bar" if tick["bar_type"] != "tick" else "tick",
-        "time": tick["timestamp"],
-        "bar": {
-            "symbol":   tick["symbol"],
-            "open":     tick["open"],
-            "high":     tick["high"],
-            "low":      tick["low"],
-            "close":    tick["close"],
-            "volume":   tick["volume"],
-            "bar_type": tick["bar_type"],
-        },
-    }
-    await client.publish(f"live:{user_id}", json.dumps(payload))
+    # Only forward real-time tick updates directly to pub/sub.
+    # Bar-close messages are published by the ingestion pipeline after ML enrichment.
+    if tick["bar_type"] == "tick":
+        payload = {
+            "type": "tick",
+            "time": tick["timestamp"],
+            "bar": {
+                "symbol":   tick["symbol"],
+                "open":     tick["open"],
+                "high":     tick["high"],
+                "low":      tick["low"],
+                "close":    tick["close"],
+                "volume":   tick["volume"],
+                "bar_type": "tick",
+            },
+        }
+        await client.publish(f"live:{user_id}", json.dumps(payload))
 
 
 # ── Per-user caches ────────────────────────────────────────────────────────

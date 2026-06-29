@@ -45,6 +45,7 @@ class RawMessage(BaseModel):
             )
 
         token, timestamp_str, symbol, open_s, high_s, low_s, close_s, volume_s, bar_type = parts
+        token = token.strip()
 
         if not token:
             raise ValueError("ConnectionToken field is empty")

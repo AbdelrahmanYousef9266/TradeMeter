@@ -1,51 +1,47 @@
 """
-Feature engine — computes 10 technical indicators from OHLCV bars.
+Feature engine — computes 16 technical indicators from OHLCV bars.
 
 One FeatureEngine instance per user keeps rolling state between bars.
-All statistics update in O(1) per bar using exponential smoothing.
+All indicators update in O(1) per bar.
 Returns None during the 50-bar warmup period.
+
+Features (16 total):
+  Original 10: rsi_14, ema_9, ema_21, ema_50, macd, macd_signal,
+               atr_14, volume_delta, bar_range, close_position
+  VWAP 3:     vwap, vwap_distance, vwap_cross
+  Time 3:     session_minutes, session_phase, is_power_hour
 """
 
 from collections import deque
+from datetime import timedelta
+
 from app.models.tick import Tick
 
 
-class _EMA:
-    """Standard exponential moving average with alpha = 2/(period+1)."""
+# ── Eastern Time helper ────────────────────────────────────────────────────
 
-    def __init__(self, period: int) -> None:
-        self._alpha = 2.0 / (period + 1)
-        self._value: float | None = None
-
-    def update(self, x: float) -> None:
-        if self._value is None:
-            self._value = x
-        else:
-            self._value = self._alpha * x + (1.0 - self._alpha) * self._value
-
-    def get(self) -> float | None:
-        return self._value
-
-
-class _WilderEMA:
+def _to_et(utc_dt):
     """
-    Wilder smoothing: alpha = 1/period.
-    Used for RSI (avg gain/loss) and ATR — both defined with Wilder's method.
+    Convert a UTC-aware datetime to Eastern Time.
+    Approximates DST: April–October = EDT (UTC-4), otherwise EST (UTC-5).
+    Accurate enough for US equity market hours (closed weekends + holidays).
     """
+    offset = timedelta(hours=-4) if 4 <= utc_dt.month <= 10 else timedelta(hours=-5)
+    return utc_dt + offset
 
-    def __init__(self, period: int) -> None:
-        self._alpha = 1.0 / period
-        self._value: float | None = None
 
-    def update(self, x: float) -> None:
-        if self._value is None:
-            self._value = x
-        else:
-            self._value = self._alpha * x + (1.0 - self._alpha) * self._value
+# Public alias used by trade_tracker and any future callers
+get_et_time = _to_et
 
-    def get(self) -> float | None:
-        return self._value
 
+# ── Constants ──────────────────────────────────────────────────────────────
+
+_WARMUP_BARS     = 50
+_SESSION_MINUTES = 390   # 9:30 AM to 4:00 PM ET
+_MARKET_OPEN_MIN = 9 * 60 + 30   # 570 minutes from midnight ET
+
+
+# ── Feature engine ─────────────────────────────────────────────────────────
 
 class FeatureEngine:
     """
@@ -54,110 +50,189 @@ class FeatureEngine:
     """
 
     def __init__(self) -> None:
-        self._bar_count: int = 0
-        self._prev_close: float | None = None
+        self.bar_count: int = 0
 
         # Price EMAs
-        self._ema_9  = _EMA(9)
-        self._ema_12 = _EMA(12)
-        self._ema_21 = _EMA(21)
-        self._ema_26 = _EMA(26)
-        self._ema_50 = _EMA(50)
+        self._ema9:  float | None = None
+        self._ema12: float | None = None   # for MACD
+        self._ema21: float | None = None
+        self._ema26: float | None = None   # for MACD
+        self._ema50: float | None = None
 
-        # MACD signal line: EMA(9) of the MACD line itself
-        self._macd_signal_ema = _EMA(9)
+        # MACD signal: EMA(9) of MACD line
+        self._macd_signal: float | None = None
 
-        # RSI components: Wilder smoothing of average gain and average loss
-        self._avg_gain = _WilderEMA(14)
-        self._avg_loss = _WilderEMA(14)
+        # RSI: Wilder smoothing of avg gain / avg loss
+        self._avg_gain: float | None = None
+        self._avg_loss: float | None = None
 
         # ATR: Wilder smoothing of true range
-        self._atr = _WilderEMA(14)
+        self._atr: float | None = None
 
-        # Volume: 20-bar simple rolling average via deque
+        # Previous close — needed for ATR, RSI change, VWAP cross
+        self._prev_close: float | None = None
+
+        # Volume rolling baseline
         self._vol_window: deque[float] = deque(maxlen=20)
+
+        # VWAP session state — resets each trading day
+        self._vwap_date       = None
+        self._vwap_cum_pv:  float = 0.0   # cumulative (typical_price × volume)
+        self._vwap_cum_vol: float = 0.0   # cumulative volume
+
+    # ── EMA helpers ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _ema(prev: float | None, value: float, period: int) -> float:
+        if prev is None:
+            return value
+        alpha = 2.0 / (period + 1)
+        return alpha * value + (1.0 - alpha) * prev
+
+    @staticmethod
+    def _wilder(prev: float | None, value: float, period: int) -> float:
+        """Wilder's smoothing (RSI, ATR): alpha = 1/period."""
+        if prev is None:
+            return value
+        return (prev * (period - 1) + value) / period
+
+    # ── VWAP ───────────────────────────────────────────────────────────────
+
+    def _update_vwap(self, bar_time, high: float, low: float, close: float, volume: float) -> float:
+        """
+        Update cumulative VWAP for the current session.
+        Resets automatically at the start of each new trading day.
+        Uses typical price: (high + low + close) / 3.
+        """
+        et      = _to_et(bar_time)
+        bar_date = et.date()
+
+        if self._vwap_date != bar_date:
+            self._vwap_date    = bar_date
+            self._vwap_cum_pv  = 0.0
+            self._vwap_cum_vol = 0.0
+
+        typical = (high + low + close) / 3.0
+        self._vwap_cum_pv  += typical * volume
+        self._vwap_cum_vol += volume
+
+        return self._vwap_cum_pv / self._vwap_cum_vol if self._vwap_cum_vol > 0 else close
+
+    # ── Time-of-day ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _time_features(bar_time) -> tuple[int, float, float]:
+        """
+        Returns (session_minutes, session_phase, is_power_hour) in ET.
+        session_minutes: 0 at 9:30 AM ET, 390 at 4:00 PM ET.
+        """
+        et  = _to_et(bar_time)
+        bar_min = et.hour * 60 + et.minute
+
+        session_minutes = max(0, min(bar_min - _MARKET_OPEN_MIN, _SESSION_MINUTES))
+        session_phase   = session_minutes / _SESSION_MINUTES
+
+        is_power_hour = 1.0 if 15 * 60 <= bar_min < 16 * 60 else 0.0
+
+        return session_minutes, round(session_phase, 4), is_power_hour
+
+    # ── Main update ────────────────────────────────────────────────────────
 
     def update(self, bar: Tick) -> dict | None:
         """
         Update all rolling stats with bar and return the feature dict.
         Returns None for the first 49 bars (insufficient history for EMA-50).
         """
-        self._bar_count += 1
+        close    = bar.close
+        high     = bar.high
+        low      = bar.low
+        volume   = float(bar.volume)
+        bar_time = bar.time
 
-        close = bar.close
-        high  = bar.high
-        low   = bar.low
-        vol   = float(bar.volume)
+        # ── EMAs ────────────────────────────────────────────────────────
+        self._ema9  = self._ema(self._ema9,  close,  9)
+        self._ema12 = self._ema(self._ema12, close, 12)
+        self._ema21 = self._ema(self._ema21, close, 21)
+        self._ema26 = self._ema(self._ema26, close, 26)
+        self._ema50 = self._ema(self._ema50, close, 50)
 
-        # ── Price EMAs ──────────────────────────────────────────────────────
-        self._ema_9.update(close)
-        self._ema_12.update(close)
-        self._ema_21.update(close)
-        self._ema_26.update(close)
-        self._ema_50.update(close)
+        macd_line        = (self._ema12 or close) - (self._ema26 or close)
+        self._macd_signal = self._ema(self._macd_signal, macd_line, 9)
 
-        # ── MACD line and signal line ────────────────────────────────────────
-        macd = (self._ema_12.get() or 0.0) - (self._ema_26.get() or 0.0)
-        self._macd_signal_ema.update(macd)
-
-        # ── RSI ─────────────────────────────────────────────────────────────
+        # ── RSI ─────────────────────────────────────────────────────────
         if self._prev_close is not None:
             change = close - self._prev_close
             gain   = max(change, 0.0)
-            loss   = abs(min(change, 0.0))
-            self._avg_gain.update(gain)
-            self._avg_loss.update(loss)
+            loss   = max(-change, 0.0)
+            self._avg_gain = self._wilder(self._avg_gain, gain, 14)
+            self._avg_loss = self._wilder(self._avg_loss, loss, 14)
 
-        # ── ATR (true range) ─────────────────────────────────────────────────
-        if self._prev_close is not None:
-            true_range = max(
-                high - low,
-                abs(high - self._prev_close),
-                abs(low  - self._prev_close),
-            )
+        if self._avg_loss is None or self._avg_loss == 0.0:
+            rsi = 100.0 if (self._avg_gain or 0.0) > 0 else 50.0
         else:
-            true_range = high - low
-        self._atr.update(true_range)
+            rs  = (self._avg_gain or 0.0) / self._avg_loss
+            rsi = 100.0 - (100.0 / (1.0 + rs))
 
-        # ── Volume rolling mean ──────────────────────────────────────────────
-        self._vol_window.append(vol)
+        # ── ATR ─────────────────────────────────────────────────────────
+        if self._prev_close is not None:
+            tr = max(high - low, abs(high - self._prev_close), abs(low - self._prev_close))
+        else:
+            tr = high - low
+        self._atr = self._wilder(self._atr, tr, 14)
 
+        # ── Volume baseline ──────────────────────────────────────────────
+        self._vol_window.append(volume)
+        avg_vol      = sum(self._vol_window) / len(self._vol_window)
+        volume_delta = (volume / avg_vol - 1.0) if avg_vol > 0 else 0.0
+
+        # ── Bar geometry ─────────────────────────────────────────────────
+        bar_range      = high - low
+        close_position = (close - low) / bar_range if bar_range > 0 else 0.5
+
+        # ── VWAP ─────────────────────────────────────────────────────────
+        vwap          = self._update_vwap(bar_time, high, low, close, volume)
+        vwap_distance = (close - vwap) / vwap if vwap > 0 else 0.0
+
+        # VWAP cross: 1.0 = crossed up, -1.0 = crossed down, 0.0 = no cross
+        vwap_cross = 0.0
+        if self._prev_close is not None:
+            prev_above = self._prev_close >= vwap
+            curr_above = close           >= vwap
+            if not prev_above and curr_above:
+                vwap_cross =  1.0
+            elif prev_above and not curr_above:
+                vwap_cross = -1.0
+
+        # ── Time of day ───────────────────────────────────────────────────
+        session_minutes, session_phase, is_power_hour = self._time_features(bar_time)
+
+        # ── Advance state ─────────────────────────────────────────────────
         self._prev_close = close
+        self.bar_count  += 1
 
-        # Warmup: need 50 bars before EMA-50 and other indicators are meaningful
-        if self._bar_count < 50:
+        if self.bar_count < _WARMUP_BARS:
             return None
 
-        # ── Compute RSI ──────────────────────────────────────────────────────
-        avg_gain = self._avg_gain.get() or 0.0
-        avg_loss = self._avg_loss.get() or 0.0
-        if avg_loss == 0.0:
-            rsi = 100.0
-        else:
-            rsi = 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
-
-        # ── Volume delta ─────────────────────────────────────────────────────
-        vol_mean = sum(self._vol_window) / len(self._vol_window)
-        volume_delta = (vol / vol_mean - 1.0) if vol_mean > 0 else 0.0
-
-        # ── Bar geometry ─────────────────────────────────────────────────────
-        bar_range = high - low
-        if bar_range > 0:
-            close_position = (close - low) / bar_range
-        else:
-            close_position = 0.5  # doji / gap — midpoint by convention
-
         return {
-            "rsi_14":       round(rsi, 4),
-            "ema_9":        round(self._ema_9.get() or 0.0,  4),
-            "ema_21":       round(self._ema_21.get() or 0.0, 4),
-            "ema_50":       round(self._ema_50.get() or 0.0, 4),
-            "macd":         round(macd, 4),
-            "macd_signal":  round(self._macd_signal_ema.get() or 0.0, 4),
-            "atr_14":       round(self._atr.get() or 0.0, 4),
-            "volume_delta": round(volume_delta, 4),
-            "bar_range":    round(bar_range, 4),
+            # Original 10
+            "rsi_14":         round(rsi,          4),
+            "ema_9":          round(self._ema9,    4),
+            "ema_21":         round(self._ema21,   4),
+            "ema_50":         round(self._ema50,   4),
+            "macd":           round(macd_line,     4),
+            "macd_signal":    round(self._macd_signal or 0.0, 4),
+            "atr_14":         round(self._atr or 0.0, 4),
+            "volume_delta":   round(volume_delta,  4),
+            "bar_range":      round(bar_range,     4),
             "close_position": round(close_position, 4),
+            # VWAP (3 new)
+            "vwap":           round(vwap,          4),
+            "vwap_distance":  round(vwap_distance, 6),
+            "vwap_cross":     vwap_cross,
+            # Time of day (3 new)
+            "session_minutes": session_minutes,
+            "session_phase":   session_phase,
+            "is_power_hour":   is_power_hour,
         }
 
 

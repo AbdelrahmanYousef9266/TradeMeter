@@ -23,6 +23,16 @@ class UserCreate(BaseModel):
 
 
 class NTTokenResponse(BaseModel):
-    token: str      # plain token shown to user once only; empty string on repeat calls
-    prefix: str     # first 6 chars kept plain for UI display ("TM-A3F...")
+    token: str | None  # full plain token on first issue; None on subsequent calls
+    prefix: str        # first 6 chars kept plain ("TM-A3F...")
     connected: bool
+    first_issue: bool  # True only on the very first call — show the "save this" warning
+
+class UserPublic(BaseModel):
+    """Subset of User safe to expose to the frontend — no token hash."""
+    id: UUID
+    email: str
+    nt_connected: bool
+
+    class Config:
+        from_attributes = True

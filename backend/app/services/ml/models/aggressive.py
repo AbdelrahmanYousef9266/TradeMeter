@@ -20,6 +20,8 @@ class AggressiveModel(BasePersonalityModel):
             "signal_mode": "aggressive",
             "learning_rate": 0.12,
             "target_multiplier": 2.0,
+            "atr_stop_mult":   2.5,    # wide stop
+            "atr_target_mult": 6.0,    # very wide target
         }
 
     def predict(self, features: dict, last_close: float, **kwargs) -> ModelPrediction:

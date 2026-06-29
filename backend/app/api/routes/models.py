@@ -38,6 +38,22 @@ _RANK_LOCKED_SETTINGS = {
 
 _RANK_ORDER = ["Rookie", "Apprentice", "Pro", "Elite", "Expert", "Master"]
 
+# Per-model defaults — returned when the in-memory pipeline doesn't exist yet
+_DEFAULT_SETTINGS: dict[str, dict] = {
+    "scalper":        {"min_confidence": 0.52, "max_signals_per_session": 40, "signal_mode": "aggressive"},
+    "momentum":       {"min_confidence": 0.62, "max_signals_per_session": 20, "signal_mode": "balanced"},
+    "mean_reversion": {"min_confidence": 0.60, "max_signals_per_session": 15, "signal_mode": "balanced",
+                       "rsi_overbought": 70, "rsi_oversold": 30},
+    "breakout":       {"min_confidence": 0.63, "max_signals_per_session": 12, "signal_mode": "balanced",
+                       "volume_spike_threshold": 1.8},
+    "conservative":   {"min_confidence": 0.75, "max_signals_per_session": 8,  "signal_mode": "conservative"},
+    "aggressive":     {"min_confidence": 0.51, "max_signals_per_session": 50, "signal_mode": "aggressive"},
+    "volume":         {"min_confidence": 0.60, "max_signals_per_session": 20, "signal_mode": "balanced",
+                       "volume_spike_threshold": 1.8, "delta_imbalance_cutoff": 0.60},
+    "contrarian":     {"min_confidence": 0.58, "max_signals_per_session": 15, "signal_mode": "balanced"},
+    "personal":       {"min_confidence": 0.60, "max_signals_per_session": 20, "auto_blend": True, "user_weight": 0.25},
+}
+
 
 def _rank_gte(a: str, b: str) -> bool:
     """Returns True if rank `a` is at or above rank `b`."""
@@ -52,23 +68,50 @@ async def list_models(
     redis=Depends(get_redis),
     conn=Depends(get_db),
 ) -> list[dict]:
-    """All 10 models with current signal from Redis cache + level info."""
-    pipeline = await get_pipeline(str(user.id), conn)
-    cached   = await get_latest_predictions(redis, str(user.id)) or {}
+    """
+    All 9 models with level info (from DB) + latest prediction signal (from Redis).
+    Queries model_levels directly — does not require the in-memory pipeline to be loaded.
+    Returns null signal when no predictions exist yet (no bars received).
+    """
+    try:
+        rows = await conn.fetch(
+            "SELECT model_name, level, xp, streak, bars_learned FROM model_levels WHERE user_id=$1",
+            user.id,
+        )
+        levels_map = {r["model_name"]: dict(r) for r in rows}
+    except Exception as exc:
+        logger.warning("list_models: could not load model_levels: %s", exc)
+        levels_map = {}
+
+    try:
+        cached = await get_latest_predictions(redis, str(user.id)) or {}
+    except Exception as exc:
+        logger.warning("list_models: Redis unavailable: %s", exc)
+        cached = {}
 
     result = []
     for name in ALL_MODEL_NAMES:
-        tracker = pipeline.xp_trackers[name]
-        signal_info = cached.get(name, {})
+        row          = levels_map.get(name, {})
+        level        = row.get("level",       1)
+        xp           = row.get("xp",          0)
+        streak       = row.get("streak",       0)
+        bars_learned = row.get("bars_learned", 0)
+        rank         = level_to_rank(level)
+        threshold    = xp_for_level(level)
+
         result.append({
-            "model_name":      name,
-            "rank":            level_to_rank(tracker.level),
-            "level":           tracker.level,
-            "xp_progress_pct": tracker.to_dict()["xp_progress_pct"],
-            "signal":          signal_info.get("signal", "HOLD"),
-            "confidence":      signal_info.get("confidence", 0.0),
-            "streak":          tracker.streak,
-            "bars_learned":    tracker.bars_learned,
+            "name":   name,
+            "signal": cached.get(name),     # None until first bar is processed
+            "level_info": {
+                "level":            level,
+                "xp":               xp,
+                "streak":           streak,
+                "bars_learned":     bars_learned,
+                "rank":             rank,
+                "xp_to_next":       max(0, threshold - xp),
+                "xp_progress_pct":  round(xp / threshold, 3) if threshold > 0 else 1.0,
+                "unlocked_settings": get_unlocked_settings(rank),
+            },
         })
     return result
 
@@ -98,29 +141,31 @@ async def leaderboard_pnl(
     user: User = Depends(get_current_user),
     conn=Depends(get_db),
 ) -> list[dict]:
-    """Models ranked by today's prediction accuracy (correct direction %)."""
-    today = datetime.now(tz=timezone.utc).date()
-    rows = await conn.fetch(
-        """SELECT model_name,
-                  COUNT(*) FILTER (WHERE actual_outcome IS NOT NULL) AS total,
-                  COUNT(*) FILTER (
-                      WHERE actual_outcome IS NOT NULL
-                        AND ((signal='BUY'  AND actual_outcome='up')
-                          OR (signal='SELL' AND actual_outcome='down'))
-                  ) AS correct
-           FROM predictions
-           WHERE user_id = $1
-             AND time >= $2::date
-           GROUP BY model_name""",
-        user.id, today,
-    )
+    """Models ranked by today's simulated P&L (Level 3 trade outcomes)."""
+    pipeline = _pipelines.get(str(user.id))
+
+    if pipeline:
+        session_pnl   = pipeline.trade_manager.get_session_pnl()
+        closed_trades = pipeline.trade_manager.closed_trades
+    else:
+        session_pnl   = {}
+        closed_trades = []
+
     result = []
-    for row in rows:
-        total = row["total"] or 0
-        correct = row["correct"] or 0
-        acc = correct / total if total else 0.0
-        result.append({"model_name": row["model_name"], "accuracy_today": round(acc, 4), "total": total})
-    result.sort(key=lambda r: r["accuracy_today"], reverse=True)
+    for name in ALL_MODEL_NAMES:
+        pnl        = session_pnl.get(name, 0.0)
+        trade_count = sum(1 for t in closed_trades if t.model_name == name)
+        wins        = sum(1 for t in closed_trades if t.model_name == name and t.won)
+        win_rate    = round(wins / trade_count, 3) if trade_count else 0.0
+        result.append({
+            "model_name":  name,
+            "pnl_points":  round(pnl, 2),
+            "pnl_dollars": round(pnl * 5.0, 2),
+            "trade_count": trade_count,
+            "win_rate":    win_rate,
+        })
+
+    result.sort(key=lambda x: x["pnl_points"], reverse=True)
     return result
 
 
@@ -132,10 +177,36 @@ async def get_model_level(
     user: User  = Depends(get_current_user),
     conn        = Depends(get_db),
 ) -> dict:
-    """Current XP, level, streak, rank, unlocked settings for one model."""
+    """
+    Current XP, level, streak, rank, unlocked settings for one model.
+    Fast path: returns from in-memory pipeline if loaded.
+    Fallback: queries model_levels table directly; uses level-1 defaults on any error.
+    """
     _validate_model_name(model_name)
-    pipeline = await get_pipeline(str(user.id), conn)
-    return pipeline.xp_trackers[model_name].to_dict()
+
+    # Fast path — pipeline already in memory (bars have arrived)
+    pipeline = _pipelines.get(str(user.id))
+    if pipeline:
+        return pipeline.xp_trackers[model_name].to_dict()
+
+    # Slow path — query DB directly (no need to initialise the whole pipeline)
+    try:
+        row = await conn.fetchrow(
+            "SELECT level, xp, streak, bars_learned FROM model_levels WHERE user_id=$1 AND model_name=$2",
+            user.id, model_name,
+        )
+    except Exception as exc:
+        logger.warning("get_model_level: DB query failed for user %s: %s", user.id, exc)
+        row = None
+
+    tracker = XPTracker(
+        str(user.id), model_name,
+        level        = row["level"]        if row else 1,
+        xp           = row["xp"]           if row else 0,
+        streak       = row["streak"]       if row else 0,
+        bars_learned = row["bars_learned"] if row else 0,
+    )
+    return tracker.to_dict()
 
 
 # ── Model settings ────────────────────────────────────────────────────────────
@@ -147,15 +218,31 @@ async def get_settings(
     conn        = Depends(get_db),
 ) -> dict:
     """
-    Return behavior settings for one model.
-    Each setting is annotated with lock status based on the model's current rank.
+    Return behavior settings for one model, annotated with lock status.
+    Uses in-memory pipeline settings if loaded; otherwise falls back to hardcoded defaults.
+    Never raises — new users always get a valid response.
     """
     _validate_model_name(model_name)
-    pipeline = await get_pipeline(str(user.id), conn)
-    rank     = pipeline.level_ranks[model_name]
-    unlocked = get_unlocked_settings(rank)
 
-    raw = _get_model(pipeline, model_name).get_settings()
+    # Determine rank (needed for lock annotations)
+    raw  = None
+    rank = "Rookie"
+
+    pipeline = _pipelines.get(str(user.id))
+    if pipeline:
+        rank = pipeline.level_ranks.get(model_name, "Rookie")
+        try:
+            raw = _get_model(pipeline, model_name).get_settings()
+        except Exception as exc:
+            logger.warning("get_settings: get_settings() failed on live pipeline: %s", exc)
+            raw = None
+
+    if raw is None:
+        raw = _DEFAULT_SETTINGS.get(
+            model_name,
+            {"min_confidence": 0.60, "max_signals_per_session": 20, "signal_mode": "balanced"},
+        )
+
     annotated = {}
     for key, val in raw.items():
         required_rank = _RANK_LOCKED_SETTINGS.get(key)

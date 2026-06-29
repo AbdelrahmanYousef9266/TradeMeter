@@ -23,6 +23,8 @@ class ContrarianModel(BasePersonalityModel):
             "signal_mode": "balanced",
             "learning_rate": 0.05,
             "consensus_threshold": 5,   # how many models must agree to trigger inversion
+            "atr_stop_mult":   1.0,    # tight — contrarian calls that are wrong hurt fast
+            "atr_target_mult": 2.5,
         }
 
     def predict(
