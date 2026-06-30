@@ -14,6 +14,7 @@ learn_all()   → updates open trades, learns from closed ones, checks CC evalua
 import asyncio
 import json
 import logging
+import pickle
 import uuid as _uuid
 from typing import Optional
 
@@ -244,6 +245,8 @@ class MLPipeline:
         self.bar_count += 1
         if self.bar_count % settings.model_snapshot_interval == 0:
             await self._snapshot_mlflow()
+        if self.bar_count % settings.model_state_save_interval == 0:
+            await self.save_state(db_conn)
 
         return level_up_events
 
@@ -315,6 +318,65 @@ class MLPipeline:
         except Exception as exc:
             logger.warning("_save_promotion failed (non-fatal): %s", exc)
 
+    # ── Model-state persistence ─────────────────────────────────────────────
+
+    async def save_state(self, db_conn: asyncpg.Connection) -> None:
+        """
+        Persist pickled model objects (8 Champion/Challenger wrappers + Personal)
+        so learned River weights survive a backend restart.
+
+        Each model is pickled and upserted independently — a failure on one model
+        never blocks the others.  Called periodically from learn_all() and once
+        more on graceful shutdown.
+        """
+        uid = _uuid.UUID(self.user_id)
+        items: list[tuple[str, object]] = list(self.cc_models.items()) + [("personal", self.personal)]
+        for name, obj in items:
+            try:
+                blob = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+            except Exception as exc:
+                logger.warning("save_state: pickle failed for %s/%s: %s", self.user_id, name, exc)
+                continue
+            try:
+                await db_conn.execute(
+                    """INSERT INTO model_state (user_id, model_name, state, bars_count, updated_at)
+                       VALUES ($1, $2, $3, $4, NOW())
+                       ON CONFLICT (user_id, model_name)
+                       DO UPDATE SET state      = EXCLUDED.state,
+                                     bars_count = EXCLUDED.bars_count,
+                                     updated_at = EXCLUDED.updated_at""",
+                    uid, name, blob, self.bar_count,
+                )
+            except Exception as exc:
+                logger.warning("save_state: DB write failed for %s/%s: %s", self.user_id, name, exc)
+
+    def restore_state(self, saved: dict[str, bytes]) -> int:
+        """
+        Unpickle saved model objects over the freshly-constructed defaults.
+        A blob that fails to unpickle (e.g. after a model class change) is
+        skipped, leaving that model at its fresh default rather than crashing.
+        Returns the number of models successfully restored.
+        """
+        restored = 0
+        for name, blob in saved.items():
+            try:
+                obj = pickle.loads(blob)
+            except Exception as exc:
+                logger.warning(
+                    "restore_state: unpickle failed for %s/%s — using fresh model: %s",
+                    self.user_id, name, exc,
+                )
+                continue
+            if name == "personal":
+                self.personal = obj
+                restored += 1
+            elif name in self.cc_models:
+                self.cc_models[name] = obj
+                restored += 1
+            else:
+                logger.warning("restore_state: unknown model_name %r in saved state — skipped", name)
+        return restored
+
     async def _snapshot_mlflow(self) -> None:
         try:
             import mlflow
@@ -373,6 +435,27 @@ async def get_pipeline(user_id: str, db_conn: asyncpg.Connection) -> MLPipeline:
             initial_levels = {}
 
         pipeline = MLPipeline(user_id, initial_levels)
+
+        # Restore persisted River weights so learning survives restarts.
+        # Falls back to fresh models on any load/unpickle failure.
+        try:
+            state_rows = await db_conn.fetch(
+                "SELECT model_name, state FROM model_state WHERE user_id = $1",
+                _uuid.UUID(user_id),
+            )
+            if state_rows:
+                saved = {r["model_name"]: r["state"] for r in state_rows}
+                n = pipeline.restore_state(saved)
+                logger.info(
+                    "get_pipeline: restored %d/%d model states for user %s",
+                    n, len(saved), user_id,
+                )
+        except Exception as exc:
+            logger.warning(
+                "get_pipeline: model_state load failed for %s (%s) — using fresh models",
+                user_id, exc,
+            )
+
         _pipelines[user_id] = pipeline
         logger.info("ML pipeline created for user %s", user_id)
         return pipeline

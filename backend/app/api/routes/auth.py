@@ -228,15 +228,6 @@ async def logout(response: Response) -> dict:
     return {"status": "logged out"}
 
 
-@router.get("/debug/token-check")
-async def debug_token_check(conn=Depends(get_db)):
-    """Temporary debug endpoint — remove after confirming token validation works."""
-    rows = await conn.fetch(
-        "SELECT id, email, nt_token_prefix, nt_token_hash IS NOT NULL AS has_hash FROM users"
-    )
-    return [dict(r) for r in rows]
-
-
 @router.get("/me", response_model=UserPublic)
 async def me(user: User = Depends(get_current_user)) -> UserPublic:
     """Return the authenticated user's public profile (no token hash)."""

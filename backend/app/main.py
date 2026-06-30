@@ -71,12 +71,25 @@ async def lifespan(app: FastAPI):
     # ── Shutdown ──────────────────────────────────────────────────────────
     logger.info("Shutting down TradeMeter backend")
 
+    # Stop ingesting first so no pipeline is mutated while we snapshot it.
     for task in (app.state.tcp_task, app.state.ingestion_task):
         task.cancel()
         try:
             await task
         except (asyncio.CancelledError, Exception):
             pass
+
+    # Persist learned model weights for every active pipeline so a restart
+    # resumes learning instead of starting from scratch.
+    try:
+        from app.services.ml.pipeline import _pipelines
+        if _pipelines:
+            async with app.state.db_pool.acquire() as conn:
+                for pl in list(_pipelines.values()):
+                    await pl.save_state(conn)
+            logger.info("Persisted model state for %d pipeline(s) on shutdown", len(_pipelines))
+    except Exception as exc:
+        logger.error("Failed to persist model state on shutdown: %s", exc)
 
     await app.state.redis.aclose()
     await app.state.db_pool.close()
