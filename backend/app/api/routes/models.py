@@ -124,7 +124,11 @@ async def leaderboard_levels(
     conn=Depends(get_db),
 ) -> list[dict]:
     """All models ranked by level DESC, then XP DESC."""
-    pipeline = await get_pipeline(str(user.id), conn)
+    try:
+        pipeline = await get_pipeline(str(user.id), conn)
+    except Exception as exc:
+        logger.error("leaderboard_levels: get_pipeline failed: %s", exc)
+        raise HTTPException(503, "Pipeline not available — try again after the first bar is received")
     rows = []
     for name in ALL_MODEL_NAMES:
         t = pipeline.xp_trackers[name]
@@ -267,6 +271,7 @@ async def update_settings(
     that is locked at the model's current rank.
     """
     _validate_model_name(model_name)
+    _validate_settings_values(new_settings)
     pipeline = await get_pipeline(str(user.id), conn)
     rank     = pipeline.level_ranks[model_name]
 
@@ -321,17 +326,21 @@ async def model_history(
     from_ts = from_ts or datetime(2000, 1, 1, tzinfo=timezone.utc)
     to_ts   = to_ts   or datetime.now(tz=timezone.utc)
 
-    rows = await conn.fetch(
-        """SELECT time, signal, confidence, actual_outcome
-           FROM   predictions
-           WHERE  user_id    = $1
-             AND  model_name = $2
-             AND  time      >= $3
-             AND  time      <= $4
-           ORDER  BY time DESC
-           LIMIT  $5""",
-        user.id, model_name, from_ts, to_ts, limit,
-    )
+    try:
+        rows = await conn.fetch(
+            """SELECT time, signal, confidence, actual_outcome
+               FROM   predictions
+               WHERE  user_id    = $1
+                 AND  model_name = $2
+                 AND  time      >= $3
+                 AND  time      <= $4
+               ORDER  BY time DESC
+               LIMIT  $5""",
+            user.id, model_name, from_ts, to_ts, limit,
+        )
+    except Exception as exc:
+        logger.error("model_history: DB query failed for user %s model %s: %s", user.id, model_name, exc)
+        raise HTTPException(503, "Database unavailable — try again shortly")
     return [
         {
             "time":           r["time"].isoformat(),
@@ -344,6 +353,46 @@ async def model_history(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+_VALID_SIGNAL_MODES = {"aggressive", "balanced", "conservative"}
+
+_SETTING_RANGES: dict[str, tuple] = {
+    "min_confidence":          (0.0,  1.0),
+    "atr_stop_mult":           (0.1,  10.0),
+    "atr_target_mult":         (0.1,  20.0),
+    "learning_rate":           (0.001, 1.0),
+    "max_signals_per_session": (1,    200),
+    "rsi_overbought":          (50,   100),
+    "rsi_oversold":            (0,    50),
+    "volume_spike_threshold":  (0.5,  10.0),
+    "delta_imbalance_cutoff":  (0.0,  1.0),
+    "user_weight":             (0.0,  1.0),
+}
+
+
+def _validate_settings_values(settings: dict) -> None:
+    """Raise 400 if any setting value is outside its sane range."""
+    for key, val in settings.items():
+        if key == "signal_mode":
+            if val not in _VALID_SIGNAL_MODES:
+                raise HTTPException(
+                    400,
+                    f"Invalid signal_mode '{val}'. Must be one of: {sorted(_VALID_SIGNAL_MODES)}",
+                )
+            continue
+        if key == "auto_blend":
+            if not isinstance(val, bool):
+                raise HTTPException(400, f"'{key}' must be a boolean")
+            continue
+        bounds = _SETTING_RANGES.get(key)
+        if bounds and isinstance(val, (int, float)):
+            lo, hi = bounds
+            if not (lo <= val <= hi):
+                raise HTTPException(
+                    400,
+                    f"Setting '{key}' value {val} is out of range [{lo}, {hi}]",
+                )
+
 
 def _validate_model_name(name: str) -> None:
     if name not in ALL_MODEL_NAMES:

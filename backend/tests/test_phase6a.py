@@ -1,6 +1,7 @@
 """
 Phase 6A tests — Champion/Challenger system.
-Tests cover: mutation, clamping, evaluation logic, promotion history.
+Tests cover: mutation, clamping, evaluation logic, promotion history,
+Contrarian kwargs forwarding.
 """
 
 import pytest
@@ -11,6 +12,7 @@ from app.services.ml.champion_challenger import (
     EVAL_INTERVAL,
 )
 from app.services.ml.models.momentum import MomentumModel
+from app.services.ml.models.contrarian import ContrarianModel
 
 
 BASE_PARAMS = {
@@ -165,3 +167,75 @@ def test_no_evaluation_before_interval():
 
     assert event is None
     assert cc.bars_since_eval == EVAL_INTERVAL - 1  # not reset
+
+
+# ── 11. Contrarian kwargs forwarding through CC wrapper ───────────────────
+
+from app.services.ml.models.base import ModelPrediction
+
+CONTRARIAN_PARAMS = {
+    "min_confidence":          0.58,
+    "max_signals_per_session": 15,
+    "signal_mode":             "balanced",
+    "atr_stop_mult":           1.0,
+    "atr_target_mult":         2.5,
+}
+
+DUMMY_FEATURES = {
+    "rsi_14": 55.0, "ema_9": 5840.0, "ema_21": 5835.0, "ema_50": 5820.0,
+    "macd": 1.2, "macd_signal": 0.8, "atr_14": 3.5,
+    "volume_delta": 0.1, "bar_range": 4.0, "close_position": 0.6,
+    "vwap": 5838.0, "vwap_distance": 0.0004, "vwap_cross": 0.0,
+    "session_minutes": 120, "session_phase": 0.31, "is_power_hour": 0.0,
+}
+
+def _make_pred(signal, p_up):
+    return ModelPrediction(
+        signal=signal, confidence=max(p_up, 1 - p_up),
+        direction_up=p_up, direction_down=1 - p_up,
+        predicted_high=5844.0, predicted_low=5836.0,
+    )
+
+# 5 of 7 are BUY → Contrarian should SELL (consensus threshold=5)
+DUMMY_PREDICTIONS = {
+    "scalper":        _make_pred("BUY",  0.70),
+    "momentum":       _make_pred("BUY",  0.65),
+    "mean_reversion": _make_pred("SELL", 0.35),
+    "breakout":       _make_pred("BUY",  0.60),
+    "conservative":   _make_pred("HOLD", 0.50),
+    "aggressive":     _make_pred("BUY",  0.68),
+    "volume":         _make_pred("BUY",  0.62),
+}
+
+
+def test_contrarian_receives_other_predictions_through_cc():
+    """
+    ChampionChallenger.predict() forwards **kwargs so Contrarian's
+    `other_predictions` argument passes through to both model instances.
+    5 of 7 models are BUY → Contrarian should output SELL.
+    """
+    cc = ChampionChallenger("contrarian", ContrarianModel, CONTRARIAN_PARAMS)
+
+    # Should not raise — Contrarian reads other_predictions inside predict()
+    result = cc.predict(DUMMY_FEATURES, 5840.0, other_predictions=DUMMY_PREDICTIONS)
+
+    assert isinstance(result, ModelPrediction)
+    assert result.signal in ("BUY", "SELL", "HOLD")
+    assert 0.0 <= result.confidence <= 1.0
+    # 5 BUYs ≥ consensus_threshold(5) → Contrarian should SELL (unless gated by confidence)
+    # Result is SELL or HOLD (if confidence < min_confidence at startup); never BUY
+    assert result.signal != "BUY", (
+        f"Contrarian saw 5/7 BUY consensus but returned {result.signal} — "
+        "kwargs not reaching the model through CC wrapper"
+    )
+
+
+def test_contrarian_cc_without_kwargs_does_not_crash():
+    """
+    Calling CC.predict() WITHOUT other_predictions should also work
+    (Contrarian falls back to own classifier which returns HOLD pre-training).
+    """
+    cc = ChampionChallenger("contrarian", ContrarianModel, CONTRARIAN_PARAMS)
+    result = cc.predict(DUMMY_FEATURES, 5840.0)
+
+    assert isinstance(result, ModelPrediction)

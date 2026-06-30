@@ -72,12 +72,18 @@ function startMock({ setBar, updateModelSignal, updateModelLevel, pushLevelUp, s
 export function useWebSocket() {
   const ws = useRef(null)
   const reconnectDelay = useRef(1000)
+  const isMounted = useRef(false)
   const { setBar, setCurrentBar, updateModelSignal, updateModelLevel, pushLevelUp, setNtConnected, setWarmup } = useStore()
 
   useEffect(() => {
     if (MOCK) return startMock({ setBar, updateModelSignal, updateModelLevel, pushLevelUp, setNtConnected, setWarmup })
 
+    isMounted.current = true
+
     function connect() {
+      // Guard: stop reconnecting if the component was already unmounted
+      if (!isMounted.current) return
+
       const url = (import.meta.env.VITE_WS_URL || 'ws://localhost:8000') + '/market/live'
       ws.current = new WebSocket(url)
 
@@ -130,14 +136,20 @@ export function useWebSocket() {
 
       ws.current.onclose = () => {
         setNtConnected(false)
-        setTimeout(connect, Math.min(reconnectDelay.current, 30000))
-        reconnectDelay.current = Math.min(reconnectDelay.current * 2, 30000)
+        // Only schedule a reconnect if this hook is still mounted
+        if (isMounted.current) {
+          setTimeout(connect, Math.min(reconnectDelay.current, 30000))
+          reconnectDelay.current = Math.min(reconnectDelay.current * 2, 30000)
+        }
       }
 
       ws.current.onerror = () => ws.current?.close()
     }
 
     connect()
-    return () => ws.current?.close()
+    return () => {
+      isMounted.current = false
+      ws.current?.close()
+    }
   }, [])
 }

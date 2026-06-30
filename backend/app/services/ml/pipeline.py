@@ -11,6 +11,7 @@ predict_all() → Champion predictions + opens simulated trades (async for conve
 learn_all()   → updates open trades, learns from closed ones, checks CC evaluations
 """
 
+import asyncio
 import json
 import logging
 import uuid as _uuid
@@ -199,10 +200,13 @@ class MLPipeline:
             tracker = self.xp_trackers.get(trade.model_name)
             if tracker:
                 if trade.won:
+                    tracker.streak += 1
                     tracker.xp = max(0, tracker.xp + 10 + int(abs(trade.pnl_points or 0) * 2))
                 elif trade.exit_reason == "timeout":
                     tracker.xp = max(0, tracker.xp + 1)
+                    # Timeout is neutral — streak unchanged
                 else:
+                    tracker.streak = 0
                     tracker.xp = max(0, tracker.xp - 5)
                 tracker.bars_learned += 1
 
@@ -329,33 +333,46 @@ class MLPipeline:
 # ── Global per-user registry ───────────────────────────────────────────────
 
 _pipelines: dict[str, MLPipeline] = {}
+_pipeline_locks: dict[str, asyncio.Lock] = {}
 
 
 async def get_pipeline(user_id: str, db_conn: asyncpg.Connection) -> MLPipeline:
+    # Fast path — no lock needed for reads once the pipeline exists
     if user_id in _pipelines:
         return _pipelines[user_id]
 
-    try:
-        rows = await db_conn.fetch(
-            """SELECT model_name, level, xp, streak, bars_learned
-               FROM   model_levels
-               WHERE  user_id = $1""",
-            _uuid.UUID(user_id),
-        )
-        initial_levels = {
-            r["model_name"]: {
-                "level":        r["level"],
-                "xp":           r["xp"],
-                "streak":       r["streak"],
-                "bars_learned": r["bars_learned"],
-            }
-            for r in rows
-        }
-    except Exception as exc:
-        logger.warning("get_pipeline: could not load model levels for %s (%s) — using defaults", user_id, exc)
-        initial_levels = {}
+    # Ensure a per-user lock exists (synchronous, atomic in asyncio — no await between
+    # the check and the assignment so no race on lock creation itself)
+    if user_id not in _pipeline_locks:
+        _pipeline_locks[user_id] = asyncio.Lock()
 
-    pipeline = MLPipeline(user_id, initial_levels)
-    _pipelines[user_id] = pipeline
-    logger.info("ML pipeline created for user %s", user_id)
-    return pipeline
+    async with _pipeline_locks[user_id]:
+        # Re-check inside the lock: another coroutine may have created the
+        # pipeline while we were waiting to acquire the lock
+        if user_id in _pipelines:
+            return _pipelines[user_id]
+
+        try:
+            rows = await db_conn.fetch(
+                """SELECT model_name, level, xp, streak, bars_learned
+                   FROM   model_levels
+                   WHERE  user_id = $1""",
+                _uuid.UUID(user_id),
+            )
+            initial_levels = {
+                r["model_name"]: {
+                    "level":        r["level"],
+                    "xp":           r["xp"],
+                    "streak":       r["streak"],
+                    "bars_learned": r["bars_learned"],
+                }
+                for r in rows
+            }
+        except Exception as exc:
+            logger.warning("get_pipeline: could not load model levels for %s (%s) — using defaults", user_id, exc)
+            initial_levels = {}
+
+        pipeline = MLPipeline(user_id, initial_levels)
+        _pipelines[user_id] = pipeline
+        logger.info("ML pipeline created for user %s", user_id)
+        return pipeline

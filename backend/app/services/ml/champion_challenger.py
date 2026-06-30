@@ -187,6 +187,7 @@ class ChampionChallenger:
         champion_pnl   = self.champion.pnl_points
         challenger_pnl = self.challenger.pnl_points
 
+        # Strict greater-than: ties always keep the Champion (stability over churn)
         if challenger_pnl > champion_pnl:
             # Challenger wins — promote it to Champion
             event = PromotionEvent(

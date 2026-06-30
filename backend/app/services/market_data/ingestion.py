@@ -150,16 +150,19 @@ async def _process_entry(
         # updates the live price line but does NOT create a new ML chart candle
         # or update model cards. Include warmup progress so the chart can show
         # a live progress bar instead of "Waiting for bar data".
-        await redis_client.publish(f"live:{user_id}", json.dumps({
-            "type": "tick",
-            "time": tick.time.isoformat(),
-            "bar":  _bar,
-            "warmup": {
-                "bars_received": engine.bar_count,
-                "bars_needed":   50,
-                "warming_up":    True,
-            },
-        }))
+        try:
+            await redis_client.publish(f"live:{user_id}", json.dumps({
+                "type": "tick",
+                "time": tick.time.isoformat(),
+                "bar":  _bar,
+                "warmup": {
+                    "bars_received": engine.bar_count,
+                    "bars_needed":   50,
+                    "warming_up":    True,
+                },
+            }))
+        except Exception as exc:
+            logger.error("Ingestion: Redis warmup publish failed: %s", exc)
         return
 
     # ── 5. Get or create per-user ML pipeline ────────────────────────────

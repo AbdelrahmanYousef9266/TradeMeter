@@ -63,10 +63,20 @@ class RawMessage(BaseModel):
         except ValueError as exc:
             raise ValueError(f"Non-numeric OHLC value: {exc}") from exc
 
+        if open_val <= 0 or high_val <= 0 or low_val <= 0 or close_val <= 0:
+            raise ValueError(
+                f"Prices must be positive: O={open_val} H={high_val} L={low_val} C={close_val}"
+            )
+        if high_val < low_val:
+            raise ValueError(f"High ({high_val}) cannot be less than Low ({low_val})")
+
         try:
             volume_val = int(volume_s)
         except ValueError:
             raise ValueError(f"Non-integer volume: {volume_s!r}")
+
+        if volume_val < 0:
+            raise ValueError(f"Volume cannot be negative: {volume_val}")
 
         return cls(
             token=token,
