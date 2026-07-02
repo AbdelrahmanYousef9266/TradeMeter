@@ -45,4 +45,9 @@ export const forceEvaluation = (name) => api.post(`/cc/${name}/evaluate`)
 export const getLSTMStatus = () => api.get('/models/lstm/status')
 export const trainLSTM     = () => api.post('/models/lstm/train')
 
+// Training Mode — replay historical data to train the models
+export const startTraining     = () => api.post('/training/start')
+export const stopTraining      = () => api.post('/training/stop')
+export const getTrainingStatus = () => api.get('/training/status')
+
 export default api
