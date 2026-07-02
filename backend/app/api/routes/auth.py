@@ -21,11 +21,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 
 from app.core.config import settings
+from app.core.redis import get_redis
 from app.core.security import (
     create_jwt,
     generate_nt_token,
     hash_nt_token,
     nt_token_lookup_hash,
+    nt_token_cache_key,
     get_current_user,
 )
 from app.db.database import get_db
@@ -197,6 +199,27 @@ async def google_callback(code: str, request: Request, state: str = "", conn=Dep
 
 # ── NT connection token ─────────────────────────────────────────────────────
 
+async def _issue_new_token(conn, user_id) -> str:
+    """
+    Generate a fresh NT token, persist ONLY its bcrypt hash + SHA-256 lookup
+    index + a masked display string, and return the plaintext.
+
+    This is the single moment the server holds the plaintext. Callers return it
+    to the client exactly once; it is never stored and never recoverable after.
+    """
+    plain_token  = generate_nt_token()       # e.g. "TM-ZVE9X2" (9 chars)
+    token_hash   = hash_nt_token(plain_token)
+    token_lookup = nt_token_lookup_hash(plain_token)
+
+    await conn.execute(
+        """UPDATE users
+           SET nt_token_hash = $1, nt_token_lookup = $2, nt_token_prefix = $3
+           WHERE id = $4""",
+        token_hash, token_lookup, _MASKED_TOKEN, user_id,
+    )
+    return plain_token
+
+
 @router.get("/nt-token", response_model=NTTokenResponse)
 async def get_nt_token(
     user: User = Depends(get_current_user),
@@ -205,12 +228,14 @@ async def get_nt_token(
     """
     Return the user's NT connection token.
 
-    On the very first call the full plain token is returned and `first_issue=True`.
-    The token is never stored in plain text — only its bcrypt hash.
-    All subsequent calls return `token=None` with only the saved prefix.
+    If a token already exists, only the masked value is returned (`token=None`,
+    `first_issue=False`) — the plaintext is never recoverable after issue. If no
+    token has ever been issued, one is auto-issued here and its full plaintext is
+    returned exactly once (`first_issue=True`). To rotate an existing token, use
+    POST /auth/nt-token/reset.
     """
     if user.nt_token_hash is not None:
-        # Token was already issued — return only the masked display value.
+        # Token already issued — return only the masked display value.
         return NTTokenResponse(
             token=None,
             prefix=user.nt_token_prefix or _MASKED_TOKEN,
@@ -218,22 +243,40 @@ async def get_nt_token(
             first_issue=False,
         )
 
-    # First issue — the plaintext is returned to the user exactly once and NEVER
-    # persisted. We store: a bcrypt hash (final verification), a SHA-256 lookup
-    # index (queryable), and a masked display string.
-    plain_token = generate_nt_token()       # e.g. "TM-ZVE9X2" (9 chars)
-    token_hash  = hash_nt_token(plain_token)
-    token_lookup = nt_token_lookup_hash(plain_token)
-
-    await conn.execute(
-        """UPDATE users
-           SET nt_token_hash = $1, nt_token_lookup = $2, nt_token_prefix = $3
-           WHERE id = $4""",
-        token_hash, token_lookup, _MASKED_TOKEN, user.id,
+    plain_token = await _issue_new_token(conn, user.id)
+    return NTTokenResponse(
+        token=plain_token,          # shown to the user exactly once
+        prefix=_MASKED_TOKEN,
+        connected=False,
+        first_issue=True,
     )
 
+
+@router.post("/nt-token/reset", response_model=NTTokenResponse)
+async def reset_nt_token(
+    user: User = Depends(get_current_user),
+    conn=Depends(get_db),
+    redis=Depends(get_redis),
+) -> NTTokenResponse:
+    """
+    Rotate the NT token: generate a brand-new one and return its full plaintext
+    exactly once. The previous token is invalidated — its cached TCP resolution
+    is purged so a NinjaTrader instance still using the old token stops
+    connecting (the user must re-paste the new token).
+    """
+    # Purge the OLD token's cached resolution so it can't keep connecting until
+    # the cache TTL expires. The cache key is keyed by the SHA-256 lookup digest,
+    # which we still have in the DB before overwriting it.
+    if user.nt_token_lookup:
+        try:
+            await redis.delete(nt_token_cache_key(user.nt_token_lookup))
+        except Exception as exc:
+            logger.warning("reset_nt_token: cache purge failed (non-fatal): %s", exc)
+
+    plain_token = await _issue_new_token(conn, user.id)
+    logger.info("NT token reset for user %s", user.id)
     return NTTokenResponse(
-        token=plain_token,
+        token=plain_token,          # shown to the user exactly once
         prefix=_MASKED_TOKEN,
         connected=False,
         first_issue=True,

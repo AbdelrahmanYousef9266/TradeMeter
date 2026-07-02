@@ -69,6 +69,15 @@ def nt_token_lookup_hash(token: str) -> str:
     return hashlib.sha256(token.strip().encode()).hexdigest()
 
 
+def nt_token_cache_key(lookup_hash: str) -> str:
+    """
+    Redis key mapping a token's SHA-256 lookup digest → user_id (the TCP
+    listener's fast path). Kept here so the issue/reset endpoints and the
+    listener build the exact same key and stay in sync.
+    """
+    return f"nt_token_cache:{lookup_hash}"
+
+
 def verify_nt_token(plain_token: str, hashed_token: str) -> bool:
     """Verify a plain token against its stored bcrypt hash."""
     try:

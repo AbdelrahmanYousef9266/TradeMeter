@@ -8,7 +8,6 @@ coroutine scope.  A Redis cache avoids bcrypt re-verification on reconnect.
 """
 
 import asyncio
-import hashlib
 import json
 import logging
 import uuid as _uuid
@@ -17,7 +16,11 @@ from datetime import datetime, timezone
 import asyncpg
 import redis.asyncio as aioredis
 
-from app.core.security import verify_nt_token, nt_token_lookup_hash
+from app.core.security import (
+    verify_nt_token,
+    nt_token_lookup_hash,
+    nt_token_cache_key,
+)
 from app.core.redis import publish_tick, cache_latest_tick
 from app.models.tick import RawMessage
 
@@ -26,11 +29,6 @@ logger = logging.getLogger(__name__)
 # Key TTL: 1 hour.  Low-security trade-off: we store sha256(token) → user_id,
 # never the plain token itself, to avoid leaking credentials into Redis.
 _TOKEN_CACHE_TTL = 3600
-
-
-def _token_cache_key(token: str) -> str:
-    digest = hashlib.sha256(token.encode()).hexdigest()
-    return f"nt_token_cache:{digest}"
 
 
 async def _resolve_token(
@@ -53,7 +51,7 @@ async def _resolve_token(
     lookup = nt_token_lookup_hash(token)
     fingerprint = lookup[:8]   # safe, non-reversible identifier for logs
 
-    cache_key = _token_cache_key(token)
+    cache_key = nt_token_cache_key(lookup)
     cached = await redis_client.get(cache_key)
     if cached:
         logger.debug("TCP: token resolved from Redis cache → user_id=%s", cached)

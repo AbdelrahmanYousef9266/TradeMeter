@@ -18,6 +18,7 @@ api.interceptors.response.use(
 export const getMe             = ()           => api.get('/auth/me')
 export const getNTStatus       = ()           => api.get('/auth/nt-status')
 export const getNTToken        = ()           => api.get('/auth/nt-token')
+export const resetNTToken      = ()           => api.post('/auth/nt-token/reset')
 export const logout            = ()           => api.post('/auth/logout')
 
 export const getModels         = ()           => api.get('/models')

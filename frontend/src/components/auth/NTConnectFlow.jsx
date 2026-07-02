@@ -8,20 +8,32 @@ const STEPS = [
   'Set TradeMeterHost to 127.0.0.1 and TradeMeterPort to 5000',
 ]
 
-export default function NTConnectFlow({ tokenData, connected, onContinue }) {
+export default function NTConnectFlow({ tokenData, connected, resetting, onReset, onContinue }) {
   const [copied, setCopied] = useState(false)
 
   // tokenData: { token, prefix, connected, first_issue }
-  const displayToken  = tokenData?.first_issue ? tokenData.token  : null
-  const displayPrefix = tokenData?.prefix || ''
+  // The full plaintext token is present ONLY in the response that issued it
+  // (first_issue). On every later load only the masked prefix is available.
+  const freshToken    = tokenData?.token || null      // full token, shown once
+  const displayPrefix = tokenData?.prefix || 'TM-••••' // masked fallback
 
   const handleCopy = () => {
-    const text = displayToken || displayPrefix
-    if (!text) return
-    navigator.clipboard.writeText(text).then(() => {
+    if (!freshToken) return
+    navigator.clipboard.writeText(freshToken).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     })
+  }
+
+  const handleReset = () => {
+    if (resetting) return
+    const ok = window.confirm(
+      'Reset your connection token?\n\n' +
+      'This immediately invalidates your current token. If NinjaTrader is ' +
+      'already running, you will need to paste the new token into the ' +
+      'ConnectionToken parameter and restart the strategy.'
+    )
+    if (ok) onReset?.()
   }
 
   const card = {
@@ -76,38 +88,56 @@ export default function NTConnectFlow({ tokenData, connected, onContinue }) {
           flex: 1, fontFamily: 'monospace', fontSize: 16,
           letterSpacing: '0.12em', color: 'var(--text-primary)',
         }}>
-          {displayToken ? displayToken : displayPrefix ? `${displayPrefix}···` : '···'}
+          {freshToken || displayPrefix}
         </code>
-        <button
-          onClick={handleCopy}
-          style={{
-            padding: '4px 10px', borderRadius: 6,
-            border: '1px solid var(--border)',
-            color: copied ? 'var(--text-success)' : 'var(--text-secondary)',
-            background: copied ? 'var(--bg-success)' : 'transparent',
-            fontSize: 12,
-          }}
-        >
-          {copied ? 'Copied!' : 'Copy'}
-        </button>
+        {freshToken ? (
+          <button
+            onClick={handleCopy}
+            style={{
+              padding: '4px 10px', borderRadius: 6,
+              border: '1px solid var(--border)',
+              color: copied ? 'var(--text-success)' : 'var(--text-secondary)',
+              background: copied ? 'var(--bg-success)' : 'transparent',
+              fontSize: 12,
+            }}
+          >
+            {copied ? 'Copied!' : 'Copy'}
+          </button>
+        ) : (
+          <button
+            onClick={handleReset}
+            disabled={resetting}
+            style={{
+              padding: '4px 10px', borderRadius: 6,
+              border: '1px solid var(--border)',
+              color: 'var(--text-secondary)',
+              background: 'transparent', fontSize: 12,
+              cursor: resetting ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {resetting ? 'Resetting…' : 'Reset token'}
+          </button>
+        )}
       </div>
 
-      {/* First-issue warning */}
-      {tokenData?.first_issue && (
+      {/* Fresh-token warning — the ONLY time the full token is visible */}
+      {freshToken && (
         <div style={{
           marginBottom: 16, padding: '8px 12px', borderRadius: 8,
           background: 'var(--bg-warning)', border: '1px solid rgba(251,191,36,0.3)',
         }}>
           <p style={{ fontSize: 12, color: 'var(--text-warning)', margin: 0 }}>
-            This token is shown once only. Save it somewhere safe.
+            Copy this now — you won't be able to see it again. If you lose it,
+            use “Reset token” to generate a new one.
           </p>
         </div>
       )}
 
-      {/* Repeat-issue note */}
-      {!tokenData?.first_issue && displayPrefix && (
+      {/* Masked state — token already issued, offer a rotate */}
+      {!freshToken && (
         <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 16 }}>
-          Token already issued. Contact support to reset.
+          Your token is hidden for security and can’t be shown again. Lost it?
+          Use “Reset token” to issue a fresh one (it’ll display once).
         </p>
       )}
 
