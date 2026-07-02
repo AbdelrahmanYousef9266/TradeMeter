@@ -1,16 +1,16 @@
 import { useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useWebSocket } from '../hooks/useWebSocket'
 import { usePredictions } from '../hooks/usePredictions'
 import Leaderboard   from '../components/dashboard/Leaderboard'
 import ModelCard      from '../components/dashboard/ModelCard'
+import LSTMCard       from '../components/dashboard/LSTMCard'
 import LiveChart      from '../components/chart/LiveChart'
 import useStore       from '../store'
 import { logout as apiLogout } from '../services/api'
 
 const MODEL_ORDER = [
   'scalper', 'momentum', 'mean_reversion', 'breakout',
-  'conservative', 'aggressive', 'volume', 'contrarian', 'personal',
+  'conservative', 'aggressive', 'volume', 'contrarian', 'personal', 'lstm',
 ]
 
 function NTStatusBadge() {
@@ -112,7 +112,8 @@ function LevelUpToast({ event, onDismiss }) {
 }
 
 export default function Dashboard() {
-  useWebSocket()
+  // The live WebSocket is owned by AuthenticatedLayout (App.jsx) so it persists
+  // across page navigation. Dashboard only pulls the initial prediction snapshot.
   usePredictions()
 
   const navigate = useNavigate()
@@ -171,12 +172,15 @@ export default function Dashboard() {
         gap: 10,
       }}>
         {MODEL_ORDER.map(name => (
-          <ModelCard
-            key={name}
-            modelName={name}
-            signal={modelSignals[name]}
-            levelInfo={modelLevels[name]}
-          />
+          name === 'lstm' ? (
+            <LSTMCard
+              key={name}
+              signal={modelSignals[name]}
+              levelInfo={modelLevels[name]}
+            />
+          ) : (
+            <ModelCard key={name} modelName={name} />
+          )
         ))}
       </div>
 

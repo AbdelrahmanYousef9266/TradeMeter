@@ -134,14 +134,27 @@ class ChampionChallenger:
 
         self.promotion_history: deque = deque(maxlen=10)
 
+        # Last predictions from each side, kept so the pipeline can open a
+        # SEPARATE challenger trade from the challenger's own signal. Without
+        # independent trades the two versions accumulate identical P&L and the
+        # challenger can never win (the original bug).
+        self.last_champion_pred = None
+        self.last_challenger_pred = None
+
     def predict(self, features: dict, last_close: float, **kwargs):
         """
-        Returns Champion prediction (live).
-        Challenger also runs to keep its state warm but result is discarded.
-        **kwargs are forwarded to both models (e.g. other_predictions for Contrarian).
+        Returns the Champion prediction (live, shown on the dashboard).
+
+        The Challenger also predicts on the same bar; its result is retained on
+        `self.last_challenger_pred` so the caller can open an independent
+        Challenger trade. **kwargs are forwarded to both models (e.g.
+        other_predictions for Contrarian).
         """
-        champion_pred = self._champion_model_obj.predict(features, last_close, **kwargs)
-        _             = self._challenger_model_obj.predict(features, last_close, **kwargs)
+        champion_pred   = self._champion_model_obj.predict(features, last_close, **kwargs)
+        challenger_pred = self._challenger_model_obj.predict(features, last_close, **kwargs)
+
+        self.last_champion_pred   = champion_pred
+        self.last_challenger_pred = challenger_pred
 
         self.bars_since_eval          += 1
         self.champion.bars_evaluated  += 1
@@ -149,31 +162,35 @@ class ChampionChallenger:
 
         return champion_pred
 
-    def learn(self, trade_outcome: dict) -> None:
-        """
-        Called when a simulated trade closes.
-        Both Champion and Challenger learn from the same outcome.
-        trade_outcome keys: signal, features, pnl_points, won, exit_price, exit_reason
-        """
+    @staticmethod
+    def _fake_trade(trade_outcome: dict):
+        """Adapt a trade-outcome dict to the object shape learn_from_trade expects."""
         class _FakeTrade:
             def __init__(self, d):
-                self.signal         = d["signal"]
-                self.features       = d["features"]
-                self.pnl_points     = d["pnl_points"]
-                self.exit_price     = d.get("exit_price") or 0.0
-                self.exit_reason    = d.get("exit_reason", "target")
-                self.won            = d["won"]
+                self.signal          = d["signal"]
+                self.features        = d["features"]
+                self.pnl_points      = d["pnl_points"]
+                self.exit_price      = d.get("exit_price") or 0.0
+                self.exit_reason     = d.get("exit_reason", "target")
+                self.won             = d["won"]
                 self.direction_label = 1 if d["signal"] == "BUY" else 0
+        return _FakeTrade(trade_outcome)
 
-        fake = _FakeTrade(trade_outcome)
-        self._champion_model_obj.learn_from_trade(fake)
-        self._challenger_model_obj.learn_from_trade(fake)
+    def learn_champion(self, trade_outcome: dict) -> None:
+        """
+        Called when a CHAMPION simulated trade closes. Only the champion model
+        learns from it and only champion P&L is recorded — keeping the two
+        versions' P&L independent so evaluation compares genuinely different
+        numbers.
+        trade_outcome keys: signal, features, pnl_points, won, exit_price, exit_reason
+        """
+        self._champion_model_obj.learn_from_trade(self._fake_trade(trade_outcome))
+        self.champion.record_trade(trade_outcome["pnl_points"], trade_outcome["won"])
 
-        # Record P&L for evaluation
-        pnl = trade_outcome["pnl_points"]
-        won = trade_outcome["won"]
-        self.champion.record_trade(pnl, won)
-        self.challenger.record_trade(pnl, won)
+    def learn_challenger(self, trade_outcome: dict) -> None:
+        """Called when a CHALLENGER simulated trade closes (silent, shadow book)."""
+        self._challenger_model_obj.learn_from_trade(self._fake_trade(trade_outcome))
+        self.challenger.record_trade(trade_outcome["pnl_points"], trade_outcome["won"])
 
     def maybe_evaluate(self) -> Optional[PromotionEvent]:
         """

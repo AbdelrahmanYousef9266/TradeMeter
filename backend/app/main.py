@@ -38,6 +38,56 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def nightly_lstm_training(app: FastAPI) -> None:
+    """
+    Retrain the LSTM (Model 11) for every active user once per day, ~2 AM ET.
+
+    Checks hourly; trains when the UTC hour is 7 (≈2 AM ET, ±1h for DST).
+    Only users with at least MIN_BARS_TO_ACTIVATE bars are trained.
+    """
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    from app.services.ml.lstm_trainer import train_lstm, count_available_bars
+    from app.services.ml.lstm_model import MIN_BARS_TO_ACTIVATE
+    from app.services.ml.pipeline import _pipelines
+
+    while True:
+        try:
+            await asyncio.sleep(3600)  # check hourly
+
+            now = datetime.now(timezone.utc)
+            if now.hour != 7:           # ~2 AM ET
+                continue
+
+            for user_id in list(_pipelines.keys()):
+                try:
+                    async with app.state.db_pool.acquire() as conn:
+                        bars = await count_available_bars(conn, user_id)
+                        if bars < MIN_BARS_TO_ACTIVATE:
+                            continue
+                        logger.info("Nightly LSTM training for user %s (%d bars)…", user_id, bars)
+                        result = await train_lstm(conn, user_id)
+                        logger.info("Nightly LSTM result for %s: %s", user_id, result)
+
+                        pipeline = _pipelines.get(user_id)
+                        if pipeline and result.get("success"):
+                            row = await conn.fetchrow(
+                                "SELECT state FROM model_state WHERE user_id=$1 AND model_name='lstm'",
+                                _uuid.UUID(user_id),
+                            )
+                            if row:
+                                pipeline.lstm.load(row["state"])
+                except Exception as exc:
+                    logger.error("Nightly LSTM training failed for %s: %s", user_id, exc)
+
+        except asyncio.CancelledError:
+            logger.info("Nightly LSTM training task cancelled")
+            break
+        except Exception as exc:
+            logger.error("Nightly LSTM training loop error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ───────────────────────────────────────────────────────────
@@ -64,6 +114,8 @@ async def lifespan(app: FastAPI):
         )
     )
 
+    app.state.lstm_task = asyncio.create_task(nightly_lstm_training(app))
+
     logger.info("TradeMeter backend ready")
 
     yield
@@ -72,7 +124,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down TradeMeter backend")
 
     # Stop ingesting first so no pipeline is mutated while we snapshot it.
-    for task in (app.state.tcp_task, app.state.ingestion_task):
+    for task in (app.state.tcp_task, app.state.ingestion_task, app.state.lstm_task):
         task.cancel()
         try:
             await task

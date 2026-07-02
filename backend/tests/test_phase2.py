@@ -110,7 +110,10 @@ def test_feature_engine_warmup():
     "vwap", "vwap_distance", "vwap_cross",
     "session_minutes", "session_phase", "is_power_hour",
 }
-    assert set(result.keys()) == expected_keys
+    # Metadata keys (leading '_', e.g. _close) are carried for target conversion
+    # but excluded from the ML feature set asserted here.
+    ml_keys = {k for k in result.keys() if not k.startswith("_")}
+    assert ml_keys == expected_keys
 
 
 # ── Test 4: close_position always in [0.0, 1.0] ─────────────────────────────

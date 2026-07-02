@@ -10,12 +10,18 @@ The trade is tracked bar by bar until:
 The outcome is then fed back to the model as the learning label.
 """
 
+from collections import deque
 from dataclasses import dataclass
 from datetime import time
 from typing import Optional
 
 MES_POINT_VALUE = 5.0    # $5 per point per contract
 SESSION_END = time(16, 0)  # 4:00 PM ET
+
+# Hard cap on the retained closed-trade history so a long-running session can't
+# grow the list without bound. Per-model session stats are tracked incrementally
+# (see TradeManager.session_stats), so nothing depends on scanning this list.
+_MAX_CLOSED_TRADES = 2000
 
 
 def _get_et_time(utc_dt):
@@ -57,19 +63,27 @@ class SimulatedTrade:
         self.bars_held += 1
         et_time = _get_et_time(bar_time)
 
+        # Pessimistic intrabar resolution: a single bar has no tick ordering, so
+        # when its range spans BOTH the stop and the target we cannot know which
+        # was hit first. Assume the worst case (stop first) rather than crediting
+        # an optimistic win — otherwise every wide bar is recorded as a WIN.
         if self.signal == "BUY":
-            if bar_high >= self.take_profit:
-                self._close(self.take_profit, "target", bar_time)
-                return True
-            if bar_low <= self.stop_loss:
+            hit_stop   = bar_low  <= self.stop_loss
+            hit_target = bar_high >= self.take_profit
+            if hit_stop:
                 self._close(self.stop_loss, "stop", bar_time)
+                return True
+            if hit_target:
+                self._close(self.take_profit, "target", bar_time)
                 return True
         elif self.signal == "SELL":
-            if bar_low <= self.take_profit:
-                self._close(self.take_profit, "target", bar_time)
-                return True
-            if bar_high >= self.stop_loss:
+            hit_stop   = bar_high >= self.stop_loss
+            hit_target = bar_low  <= self.take_profit
+            if hit_stop:
                 self._close(self.stop_loss, "stop", bar_time)
+                return True
+            if hit_target:
+                self._close(self.take_profit, "target", bar_time)
                 return True
 
         if et_time >= SESSION_END:
@@ -126,8 +140,12 @@ class TradeManager:
     def __init__(self, user_id: str):
         self.user_id = user_id
         self.open_trades: dict[str, list[SimulatedTrade]] = {}
-        self.closed_trades: list[SimulatedTrade] = []
+        # Bounded history — recent closed trades only (see _MAX_CLOSED_TRADES).
+        self.closed_trades: deque[SimulatedTrade] = deque(maxlen=_MAX_CLOSED_TRADES)
         self.session_pnl: dict[str, float] = {}
+        # Incremental per-model session stats so callers never rescan closed_trades.
+        # {model_name: {"points": float, "wins": int, "losses": int, "trades": int}}
+        self.session_stats: dict[str, dict] = {}
         self._last_session_date = None
 
     def open_trade(
@@ -192,8 +210,11 @@ class TradeManager:
         et = get_et_time(bar_time)
         bar_date = et.date()
         if self._last_session_date != bar_date:
+            # Reset points AND win/loss counters together so the dashboard never
+            # shows today's points next to all-time W/L (they must stay in sync).
             self._last_session_date = bar_date
             self.session_pnl = {}
+            self.session_stats = {}
 
         newly_closed = []
 
@@ -207,18 +228,40 @@ class TradeManager:
                     self.session_pnl[model_name] = (
                         self.session_pnl.get(model_name, 0.0) + (trade.pnl_points or 0)
                     )
+                    self._record_session_stat(model_name, trade)
                 else:
                     still_open.append(trade)
             self.open_trades[model_name] = still_open
 
         return newly_closed
 
+    def _record_session_stat(self, model_name: str, trade: SimulatedTrade) -> None:
+        """Fold one closed trade into the incremental per-model session stats."""
+        stat = self.session_stats.setdefault(
+            model_name, {"points": 0.0, "wins": 0, "losses": 0, "trades": 0}
+        )
+        stat["points"] += (trade.pnl_points or 0.0)
+        stat["trades"] += 1
+        if trade.won:
+            stat["wins"] += 1
+        elif trade.exit_reason != "timeout":
+            # timeout (scratch) is neutral — neither a win nor a loss
+            stat["losses"] += 1
+
     def get_session_pnl(self) -> dict[str, float]:
         """Returns today's P&L in points per model."""
         return dict(self.session_pnl)
 
+    def get_session_stats(self, model_name: str) -> dict:
+        """Today's {points, wins, losses, trades} for one model (zeros if none)."""
+        return dict(
+            self.session_stats.get(
+                model_name, {"points": 0.0, "wins": 0, "losses": 0, "trades": 0}
+            )
+        )
+
     def pop_closed_trades(self) -> list[SimulatedTrade]:
         """Returns and clears the closed trades queue."""
         trades = list(self.closed_trades)
-        self.closed_trades = []
+        self.closed_trades.clear()
         return trades

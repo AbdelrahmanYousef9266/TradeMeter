@@ -13,6 +13,16 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 
+def ml_features(features: dict) -> dict:
+    """
+    Strip metadata keys (those prefixed with '_', e.g. _close) before passing a
+    feature dict to a River model.  Metadata rides alongside the 16 real features
+    for bookkeeping (ATR-relative target conversion) but must NEVER be trained on
+    — a raw price like _close would dominate a linear regressor.
+    """
+    return {k: v for k, v in features.items() if not k.startswith("_")}
+
+
 @dataclass
 class ModelPrediction:
     signal:         str    # "BUY" | "SELL" | "HOLD"
@@ -69,7 +79,7 @@ class BasePersonalityModel(ABC):
         Handles untrained classifiers safely.
         """
         try:
-            proba = self.classifier.predict_proba_one(features)
+            proba = self.classifier.predict_proba_one(ml_features(features))
             p_up   = proba.get(1, 0.5) if proba else 0.5
             p_down = proba.get(0, 0.5) if proba else 0.5
         except Exception:
@@ -83,18 +93,33 @@ class BasePersonalityModel(ABC):
         return p_up, p_down
 
     def _raw_targets(self, features: dict, last_close: float) -> tuple[float, float]:
-        """Return (predicted_high, predicted_low) from the regressors."""
+        """
+        Return (predicted_high, predicted_low) as absolute prices.
+
+        The regressors predict ATR-relative *offsets* — how many ATRs the high
+        sits above / the low sits below the current close — not absolute prices.
+        Linear regression on raw prices extrapolates wildly (a next-bar target
+        45 % above spot); offsets stay bounded.  Offsets are clamped to 0.5–5 ATR
+        and converted back to absolute prices here.
+        """
+        atr = features.get("atr_14") or 1.0
+        if atr <= 0:
+            atr = 1.0
+
+        ml = ml_features(features)
         try:
-            ph = self.regressor_high.predict_one(features) or 0.0
-            pl = self.regressor_low.predict_one(features)  or 0.0
+            high_off = self.regressor_high.predict_one(ml)
+            low_off  = self.regressor_low.predict_one(ml)
         except Exception:
-            ph, pl = 0.0, 0.0
-        # Fall back to ±0.1 % of last close if regressors are untrained
-        if ph == 0.0 or ph < last_close * 0.98:
-            ph = last_close * 1.001
-        if pl == 0.0 or pl > last_close * 1.02:
-            pl = last_close * 0.999
-        return ph, pl
+            high_off = low_off = None
+
+        # Untrained regressors return 0.0 → fall back to a 2-ATR default.
+        high_off = max(0.5, min(high_off if high_off else 2.0, 5.0))
+        low_off  = max(0.5, min(low_off  if low_off  else 2.0, 5.0))
+
+        ph = last_close + high_off * atr
+        pl = last_close - low_off  * atr
+        return round(ph, 2), round(pl, 2)
 
     def _apply_gates(
         self,
@@ -144,19 +169,32 @@ class BasePersonalityModel(ABC):
         label_high:      float,
         label_low:       float,
     ) -> None:
-        """Update classifier and regressors with the bar's true outcome."""
+        """
+        Update classifier (direction) and regressors (price targets).
+
+        Regressor targets are ATR-relative offsets, not absolute prices:
+          high_offset = (label_high - close) / atr   (ATRs above close)
+          low_offset  = (close - label_low) / atr    (ATRs below close)
+        clamped to 0–5 ATR so a single outlier bar can't blow up the weights.
+        """
+        ml = ml_features(features)
         try:
-            self.classifier.learn_one(features, label_direction)
+            self.classifier.learn_one(ml, label_direction)
         except Exception:
             pass
-        try:
-            self.regressor_high.learn_one(features, label_high)
-        except Exception:
-            pass
-        try:
-            self.regressor_low.learn_one(features, label_low)
-        except Exception:
-            pass
+
+        close = features.get("_close") or features.get("close")
+        atr   = features.get("atr_14") or 1.0
+        if atr <= 0:
+            atr = 1.0
+        if close:
+            high_off = max(0.0, min((label_high - close) / atr, 5.0))
+            low_off  = max(0.0, min((close - label_low) / atr, 5.0))
+            try:
+                self.regressor_high.learn_one(ml, high_off)
+                self.regressor_low.learn_one(ml, low_off)
+            except Exception:
+                pass
         self.bar_count += 1
 
     def learn_from_trade(self, trade) -> None:
@@ -173,21 +211,32 @@ class BasePersonalityModel(ABC):
         label = trade.direction_label if trade.won else 1 - trade.direction_label
 
         # Magnitude weight (bigger P&L relative to ATR = stronger signal)
-        atr = trade.features.get("atr_14", 1.0)
+        atr = trade.features.get("atr_14") or 1.0
+        if atr <= 0:
+            atr = 1.0
         magnitude = abs(trade.pnl_points or 0) / max(atr, 0.01)
         weight = min(magnitude, 3.0)  # cap at 3× to prevent outlier dominance
 
+        ml = ml_features(trade.features)
         try:
-            self.classifier.learn_one(trade.features, label)
+            self.classifier.learn_one(ml, label)
         except Exception:
             pass
-        try:
-            if trade.signal == "BUY":
-                self.regressor_high.learn_one(trade.features, trade.exit_price)
-            else:
-                self.regressor_low.learn_one(trade.features, trade.exit_price)
-        except Exception:
-            pass
+
+        # Train the relevant regressor on the realized exit distance as an
+        # ATR-relative offset from the close at signal time (never absolute
+        # price — that extrapolates wildly). Clamped to 0–5 ATR.
+        close = trade.features.get("_close") or trade.features.get("close")
+        if close:
+            try:
+                if trade.signal == "BUY":
+                    off = max(0.0, min((trade.exit_price - close) / atr, 5.0))
+                    self.regressor_high.learn_one(ml, off)
+                else:
+                    off = max(0.0, min((close - trade.exit_price) / atr, 5.0))
+                    self.regressor_low.learn_one(ml, off)
+            except Exception:
+                pass
         self.bar_count += 1
 
     def reset(self) -> None:

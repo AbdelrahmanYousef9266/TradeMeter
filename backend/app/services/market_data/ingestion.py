@@ -253,8 +253,8 @@ async def _process_entry(
         predictions = await pipeline.predict_all(
             features,
             tick.close,
-            next_bar_open = tick.open,
-            bar_time      = tick.time,
+            current_bar_open = tick.open,
+            bar_time         = tick.time,
         )
 
         pred_cache = {
@@ -274,24 +274,33 @@ async def _process_entry(
             for name, tracker in pipeline.xp_trackers.items()
         }
 
-        session_pnl = pipeline.trade_manager.get_session_pnl()
+        # Enrich per-model P&L with win/loss and open-trade counts for the cards.
+        # Points and win/loss counts are today's session, read from incremental
+        # counters (never a rescan of the trade history) so they stay in sync and
+        # cost O(1) per model regardless of how many trades have closed.
+        tm = pipeline.trade_manager
+        pnl_detail = {}
+        for name in pipeline.xp_trackers.keys():
+            stats      = tm.get_session_stats(name)
+            open_count = len(tm.open_trades.get(name, []))
+            pnl_detail[name] = {
+                "points":  round(stats["points"], 2),
+                "dollars": round(stats["points"] * 5.0, 2),
+                "wins":    stats["wins"],
+                "losses":  stats["losses"],
+                "open":    open_count,
+            }
 
         # 8. Publish enriched bar BEFORE DB writes — WS must not be blocked by DB.
         await redis_client.publish(f"live:{user_id}", json.dumps({
-            "type":     "bar",
-            "time":     tick.time.isoformat(),
-            "bar":      _bar,
-            "features": features,
-            "models":   pred_cache,
-            "levels":   levels_dict,
-            "warmup":   None,   # signals to frontend: past warmup, predictions are live
-            "session_pnl": {
-                name: {
-                    "points":  round(pnl, 2),
-                    "dollars": round(pnl * 5.0, 2),
-                }
-                for name, pnl in session_pnl.items()
-            },
+            "type":        "bar",
+            "time":        tick.time.isoformat(),
+            "bar":         _bar,
+            "features":    features,
+            "models":      pred_cache,
+            "levels":      levels_dict,
+            "warmup":      None,   # signals to frontend: past warmup, predictions are live
+            "session_pnl": pnl_detail,
         }))
 
         # 9. Cache latest predictions in Redis

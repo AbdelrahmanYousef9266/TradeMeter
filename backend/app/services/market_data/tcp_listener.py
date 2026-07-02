@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 import asyncpg
 import redis.asyncio as aioredis
 
-from app.core.security import verify_nt_token
+from app.core.security import verify_nt_token, nt_token_lookup_hash
 from app.core.redis import publish_tick, cache_latest_tick
 from app.models.tick import RawMessage
 
@@ -43,37 +43,33 @@ async def _resolve_token(
 
     Strategy:
     1. Fast path — check Redis cache (sha256(token) → user_id).
-    2. Slow path — filter by stored prefix, then bcrypt-verify candidates.
-       Cache the result on success for future reconnections.
+    2. Slow path — look up the row by the SHA-256 lookup index, then
+       bcrypt-verify. Cache the result on success for future reconnections.
+
+    The plaintext token is never persisted and never logged — only a short,
+    non-reversible fingerprint of its SHA-256 digest appears in diagnostics.
     """
     token = token.strip()
+    lookup = nt_token_lookup_hash(token)
+    fingerprint = lookup[:8]   # safe, non-reversible identifier for logs
+
     cache_key = _token_cache_key(token)
     cached = await redis_client.get(cache_key)
     if cached:
         logger.debug("TCP: token resolved from Redis cache → user_id=%s", cached)
         return cached
 
-    # Tokens are "TM-XXXXXX" (9 chars total).
-    # nt_token_prefix in the DB holds the FULL 9-char token for exact matching.
-    logger.debug("TCP: resolving token bytes=%r len=%d", token, len(token))
-
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, nt_token_hash, email FROM users "
-            "WHERE nt_token_prefix = $1 AND nt_token_hash IS NOT NULL",
-            token,  # exact match against full stored token
+            "WHERE nt_token_lookup = $1 AND nt_token_hash IS NOT NULL",
+            lookup,
         )
 
     if not rows:
-        # No exact match — log DB state to help diagnose stale tokens.
-        async with db_pool.acquire() as conn:
-            all_rows = await conn.fetch(
-                "SELECT email, nt_token_prefix, nt_token_hash IS NOT NULL AS has_hash FROM users"
-            )
         logger.warning(
-            "TCP: no user found for token %r — DB state: %s",
-            token,
-            [dict(r) for r in all_rows],
+            "TCP: no user matches token fingerprint %s… (0 index matches)",
+            fingerprint,
         )
         return None
 
@@ -84,11 +80,11 @@ async def _resolve_token(
             logger.info("TCP: token verified for %s → user_id=%s", row["email"], user_id)
             return user_id
 
-    # Exact prefix matched but bcrypt failed — hash mismatch, token likely rotated.
+    # Lookup index matched but bcrypt failed — hash mismatch / rotated token.
     logger.warning(
-        "TCP: token %r found in DB but bcrypt verification failed — "
-        "user should refresh token on the Connect page",
-        token,
+        "TCP: token fingerprint %s… matched %d index row(s) but bcrypt "
+        "verification failed — user should refresh token on the Connect page",
+        fingerprint, len(rows),
     )
     return None
 

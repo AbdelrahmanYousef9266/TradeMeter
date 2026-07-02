@@ -233,6 +233,9 @@ class FeatureEngine:
             "session_minutes": session_minutes,
             "session_phase":   session_phase,
             "is_power_hour":   is_power_hour,
+            # Metadata (leading '_' → excluded from ML training, see ml_features()).
+            # Carried so models can convert ATR-relative target offsets ↔ prices.
+            "_close":          close,
         }
 
 

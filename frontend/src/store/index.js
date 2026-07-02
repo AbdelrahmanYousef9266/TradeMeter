@@ -33,6 +33,8 @@ const useStore = create((set) => ({
   })),
   // setCurrentBar: updates live price display only — use for ticks and warmup bars
   setCurrentBar: (bar) => set({ currentBar: bar }),
+  // setBarHistory: bulk-replace history (used to hydrate the chart on page load)
+  setBarHistory: (bars) => set({ barHistory: bars, currentBar: bars[bars.length - 1] ?? null }),
 
   // Model signals keyed by model name
   // Each entry: { signal, confidence, direction_up, direction_down, predicted_high, predicted_low }
@@ -46,6 +48,13 @@ const useStore = create((set) => ({
   modelLevels: {},
   updateModelLevel: (name, level) => set(state => ({
     modelLevels: { ...state.modelLevels, [name]: level },
+  })),
+
+  // Session P&L keyed by model name
+  // Each entry: { points, dollars, wins, losses, open }
+  modelPnl: {},
+  updateModelPnl: (name, pnl) => set(state => ({
+    modelPnl: { ...state.modelPnl, [name]: pnl },
   })),
 
   // Leaderboard data

@@ -1,3 +1,4 @@
+import hashlib
 import secrets
 import string
 import logging
@@ -52,8 +53,20 @@ def generate_nt_token() -> str:
 
 
 def hash_nt_token(token: str) -> str:
-    """Return a bcrypt hash of the token for database storage."""
+    """Return a bcrypt hash of the token for database storage (final verification)."""
     return bcrypt.hashpw(token.encode(), bcrypt.gensalt()).decode()
+
+
+def nt_token_lookup_hash(token: str) -> str:
+    """
+    Deterministic SHA-256 hex digest used as the DB *lookup index* for a token.
+
+    bcrypt salts every hash, so it can't be queried by equality — we need a
+    stable index to find the candidate row, then bcrypt-verify it. This digest
+    is NOT reversible and is never the token itself, so it is safe to store and
+    to log a short prefix of. The plaintext token is never persisted.
+    """
+    return hashlib.sha256(token.strip().encode()).hexdigest()
 
 
 def verify_nt_token(plain_token: str, hashed_token: str) -> bool:

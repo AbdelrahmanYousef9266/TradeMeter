@@ -1,10 +1,5 @@
-import { useRef, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-
-const RANK_COLORS = {
-  Rookie: '#6b7280', Apprentice: '#185FA5', Pro: '#0F6E56',
-  Elite: '#534AB7', Expert: '#854F0B', Master: '#993C1D',
-}
+import useStore from '../../store'
 
 const MODEL_META = {
   scalper:        { label: 'Scalper',         style: 'Ultra short-term' },
@@ -16,161 +11,179 @@ const MODEL_META = {
   volume:         { label: 'Volume',          style: 'Order flow'       },
   contrarian:     { label: 'Contrarian',      style: 'Bets against crowd'},
   personal:       { label: 'You',             style: 'Hybrid · Model 9' },
+  lstm:           { label: 'Deep LSTM',       style: 'Sequence patterns · Model 11' },
 }
 
-const SIGNAL_COLORS = {
-  BUY:  { text: 'var(--text-success)', bg: 'var(--bg-success)' },
-  SELL: { text: 'var(--text-danger)',  bg: 'var(--bg-danger)'  },
-  HOLD: { text: 'var(--text-warning)', bg: 'var(--bg-warning)' },
+const RANK_COLORS = {
+  Rookie:     'var(--text-muted)',
+  Apprentice: '#3B82C4',
+  Pro:        '#1D9E75',
+  Elite:      '#7F77DD',
+  Expert:     '#BA7517',
+  Master:     '#D85A30',
 }
 
-function XpBar({ pct, color }) {
-  return (
-    <div style={{ height: 4, background: 'var(--surface-3)', borderRadius: 2, overflow: 'hidden', flex: 1 }}>
-      <div style={{
-        height: '100%', width: `${Math.min((pct ?? 0) * 100, 100)}%`,
-        background: color, borderRadius: 2,
-        transition: 'width 0.5s ease',
-      }} />
-    </div>
-  )
-}
+export default function ModelCard({ modelName }) {
+  const { modelSignals, modelLevels, modelPnl } = useStore()
 
-export default function ModelCard({ modelName, signal, levelInfo }) {
-  const meta      = MODEL_META[modelName] || { label: modelName, style: '' }
-  const rank      = levelInfo?.rank || 'Rookie'
-  const rankColor = RANK_COLORS[rank] || RANK_COLORS.Rookie
+  const signal = modelSignals[modelName] || {}
+  const level  = modelLevels[modelName] || {}
+  const pnl    = modelPnl[modelName] || {}
+
+  const meta = MODEL_META[modelName] || { label: modelName, style: '' }
   const isPersonal = modelName === 'personal'
-  const sigData   = signal ? SIGNAL_COLORS[signal.signal] || SIGNAL_COLORS.HOLD : null
-  const streak    = levelInfo?.streak ?? 0
+  const isLSTM = modelName === 'lstm'
 
-  // Flash border on new signal
-  const prevSignalRef = useRef(null)
-  const [flashing, setFlashing] = useState(false)
-  useEffect(() => {
-    if (signal?.signal && signal.signal !== prevSignalRef.current) {
-      prevSignalRef.current = signal.signal
-      setFlashing(true)
-      const t = setTimeout(() => setFlashing(false), 700)
-      return () => clearTimeout(t)
-    }
-  }, [signal?.signal])
+  const sig = signal.signal || '—'
+  const conf = signal.confidence ? Math.round(signal.confidence * 100) : null
+  const target = signal.predicted_high ? signal.predicted_high.toFixed(2) : '—'
+
+  const lvl = level.level ?? 1
+  const rank = level.rank ?? 'Rookie'
+  const xpPct = level.xp_progress_pct ?? 0
+  const streak = level.streak ?? 0
+  const barsLearned = level.bars_learned ?? 0
+
+  const pnlPoints = pnl.points ?? 0
+  const pnlDollars = pnl.dollars ?? 0
+  const wins = pnl.wins ?? 0
+  const losses = pnl.losses ?? 0
+  const openTrades = pnl.open ?? 0
+
+  const pnlColor = pnlPoints > 0 ? 'var(--text-success)'
+                 : pnlPoints < 0 ? 'var(--text-danger)'
+                 : 'var(--text-muted)'
+
+  const sigBg = sig === 'BUY' ? 'var(--bg-success)'
+              : sig === 'SELL' ? 'var(--bg-danger)'
+              : 'var(--surface-1)'
+  const sigColor = sig === 'BUY' ? 'var(--text-success)'
+                 : sig === 'SELL' ? 'var(--text-danger)'
+                 : 'var(--text-muted)'
 
   return (
-    <div
-      id={`model-card-${modelName}`}
-      style={{
-        background: 'var(--surface-2)',
-        border: `0.5px solid ${flashing ? 'var(--accent)' : isPersonal ? `${rankColor}55` : 'var(--border)'}`,
-        borderRadius: 12,
-        padding: '12px 14px',
-        display: 'flex', flexDirection: 'column', gap: 10,
-        transition: 'border-color 0.3s',
-        boxShadow: flashing ? '0 0 0 1.5px var(--accent)' : 'none',
-      }}
-    >
-      {/* Row 1: name + rank badge */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {/* Avatar */}
-          <div style={{
-            width: 28, height: 28, borderRadius: 7, flexShrink: 0,
-            background: `${rankColor}22`, border: `1px solid ${rankColor}44`,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 12, fontWeight: 500, color: rankColor,
-          }}>
-            {meta.label[0]}
-          </div>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)' }}>
-              {meta.label}
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{meta.style}</div>
-          </div>
+    <div style={{
+      background: 'var(--surface-2)',
+      border: isPersonal ? '2px solid var(--border-accent)' : '0.5px solid var(--border)',
+      borderRadius: '12px',
+      padding: '14px 16px',
+    }}>
+      {/* Header */}
+      <div style={{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'10px' }}>
+        <div style={{
+          width:'32px', height:'32px', borderRadius:'50%',
+          background:'var(--surface-1)', display:'flex',
+          alignItems:'center', justifyContent:'center',
+          fontSize:'11px', fontWeight:500, color:'var(--text-primary)', flexShrink:0
+        }}>
+          {meta.label.slice(0,2).toUpperCase()}
+        </div>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:'13px', fontWeight:500, color:'var(--text-primary)' }}>{meta.label}</div>
+          <div style={{ fontSize:'11px', color:'var(--text-muted)' }}>{meta.style}</div>
         </div>
         <span style={{
-          fontSize: 10, fontWeight: 500, padding: '2px 7px', borderRadius: 5,
-          background: `${rankColor}22`, color: rankColor, flexShrink: 0,
+          fontSize:'10px', fontWeight:500, padding:'2px 8px',
+          borderRadius:'20px', background:'var(--surface-1)',
+          color: RANK_COLORS[rank] || 'var(--text-muted)', whiteSpace:'nowrap'
+        }}>{rank}</span>
+      </div>
+
+      {/* Signal row */}
+      <div style={{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'10px' }}>
+        <span style={{
+          fontSize:'12px', fontWeight:500, padding:'3px 10px',
+          borderRadius:'var(--radius)', background:sigBg, color:sigColor
         }}>
-          {rank}
+          {sig === 'BUY' ? '▲' : sig === 'SELL' ? '▼' : '—'} {sig}{conf !== null ? ` ${conf}%` : ''}
+        </span>
+        <span style={{ fontSize:'11px', color:'var(--text-muted)', marginLeft:'auto' }}>
+          Target {target}
         </span>
       </div>
 
-      {/* Row 2: signal + level progress */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        {sigData ? (
-          <span style={{
-            fontSize: 12, fontWeight: 500, padding: '3px 9px', borderRadius: 6,
-            background: sigData.bg, color: sigData.text, flexShrink: 0,
-          }}>
-            {signal.signal} {Math.round((signal.confidence ?? 0) * 100)}%
+      {/* P&L block — the key stream feature */}
+      <div style={{
+        display:'flex', alignItems:'center', justifyContent:'space-between',
+        background:'var(--surface-1)', borderRadius:'var(--radius)',
+        padding:'8px 10px', marginBottom:'10px'
+      }}>
+        <div style={{ textAlign:'center', flex:1 }}>
+          <span style={{ fontSize:'15px', fontWeight:500, color:pnlColor, display:'block' }}>
+            {pnlPoints > 0 ? '+' : ''}{pnlPoints} pts
           </span>
-        ) : (
-          <span style={{
-            fontSize: 12, padding: '3px 9px', borderRadius: 6,
-            background: 'var(--surface-3)', color: 'var(--text-secondary)', flexShrink: 0,
-          }}>
-            —
+          <span style={{ fontSize:'10px', color:'var(--text-muted)' }}>Session P&L</span>
+        </div>
+        <div style={{ width:'1px', height:'28px', background:'var(--border)' }}/>
+        <div style={{ textAlign:'center', flex:1 }}>
+          <span style={{ fontSize:'15px', fontWeight:500, color:pnlColor, display:'block' }}>
+            {pnlDollars > 0 ? '+' : ''}${pnlDollars}
           </span>
-        )}
-
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ fontSize: 11, color: 'var(--text-secondary)', flexShrink: 0 }}>
-            Lv {levelInfo?.level ?? 1}
+          <span style={{ fontSize:'10px', color:'var(--text-muted)' }}>Dollars</span>
+        </div>
+        <div style={{ width:'1px', height:'28px', background:'var(--border)' }}/>
+        <div style={{ textAlign:'center', flex:1 }}>
+          <span style={{ fontSize:'15px', fontWeight:500, color:'var(--text-primary)', display:'block' }}>
+            {wins}/{losses}
           </span>
-          <XpBar pct={levelInfo?.xp_progress_pct} color={rankColor} />
-          <span style={{ fontSize: 10, color: 'var(--text-secondary)', flexShrink: 0 }}>
-            {Math.round((levelInfo?.xp_progress_pct ?? 0) * 100)}%
-          </span>
+          <span style={{ fontSize:'10px', color:'var(--text-muted)' }}>W/L</span>
         </div>
       </div>
 
-      {/* Row 3: metrics */}
-      <div style={{
-        display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
-        gap: 4, paddingTop: 8,
-        borderTop: '1px solid var(--border-subtle)',
-      }}>
-        {[
-          { label: 'Target',  value: signal?.predicted_high ? signal.predicted_high.toFixed(1) : '—' },
-          { label: 'Dir↑',    value: signal?.direction_up   ? `${Math.round(signal.direction_up * 100)}%` : '—' },
-          {
-            label: 'Streak',
-            value: streak > 0 ? `${streak > 4 ? '🔥' : ''}${streak}` : '0',
-            color: streak >= 5 ? 'var(--text-success)' : undefined,
-          },
-          { label: 'Bars',    value: levelInfo?.bars_learned ?? '—' },
-        ].map(({ label, value, color }) => (
-          <div key={label} style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 2 }}>{label}</div>
-            <div style={{ fontSize: 12, color: color || 'var(--text-primary)' }}>{value}</div>
-          </div>
-        ))}
+      {/* Open trades / blend info */}
+      <div style={{ fontSize:'11px', color:'var(--text-muted)', marginBottom:'10px', textAlign:'center' }}>
+        {isPersonal
+          ? (level.blend ? `Blend: ${level.blend}` : 'Hybrid ensemble')
+          : openTrades > 0
+            ? `${openTrades} open trade${openTrades > 1 ? 's' : ''}`
+            : 'No open trades'}
       </div>
 
-      {/* Row 4: tune link + CC indicator */}
-      <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        paddingTop: 6, borderTop: '1px solid var(--border-subtle)',
-      }}>
-        <Link
-          to={`/models/${modelName}`}
-          style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 4 }}
-          onMouseEnter={e => e.currentTarget.style.color = 'var(--accent)'}
-          onMouseLeave={e => e.currentTarget.style.color = 'var(--text-secondary)'}
-        >
-          Tune behavior ↗
+      {/* XP bar */}
+      {!isLSTM && (
+        <>
+          <div style={{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'10px' }}>
+            <span style={{ fontSize:'11px', color:'var(--text-muted)', whiteSpace:'nowrap' }}>Lv {lvl}</span>
+            <div style={{ flex:1, height:'4px', background:'var(--surface-1)', borderRadius:'2px', overflow:'hidden' }}>
+              <div style={{
+                height:'4px', borderRadius:'2px',
+                width:`${Math.round(xpPct * 100)}%`,
+                background:'var(--fill-accent)', transition:'width 0.3s ease'
+              }}/>
+            </div>
+            <span style={{ fontSize:'11px', color: streak >= 5 ? 'var(--text-success)' : 'var(--text-muted)', whiteSpace:'nowrap' }}>
+              {streak >= 5 ? `🔥 ${streak}` : `${streak}`}
+            </span>
+          </div>
+
+          {/* Stats row */}
+          <div style={{ display:'flex', justifyContent:'space-between', fontSize:'10px', color:'var(--text-muted)', marginBottom:'10px' }}>
+            <span>{barsLearned.toLocaleString()} bars learned</span>
+            <span>{wins + losses > 0 ? `${Math.round(wins / (wins + losses) * 100)}% win rate` : 'No trades yet'}</span>
+          </div>
+        </>
+      )}
+
+      {/* Tune button — SPA navigation via <Link> (a plain <a href> would full-reload
+          the app and tear down the persistent WebSocket) */}
+      {isLSTM ? (
+        <span style={{
+          display:'block', textAlign:'center', fontSize:'11px',
+          padding:'6px', borderRadius:'var(--radius)',
+          border:'0.5px solid var(--border-strong)', color:'var(--text-muted)'
+        }}>
+          Batch trained
+        </span>
+      ) : (
+        <Link to={`/models/${modelName}`} style={{
+          display:'block', textAlign:'center', fontSize:'11px',
+          padding:'6px', borderRadius:'var(--radius)',
+          border:'0.5px solid var(--border-strong)',
+          color:'var(--text-secondary)', textDecoration:'none'
+        }}>
+          {isPersonal ? 'Customize me ↗' : 'Tune behavior ↗'}
         </Link>
-        {!isPersonal && (
-          <Link
-            to="/champion-challenger"
-            style={{ fontSize: 10, color: 'var(--text-tertiary)', opacity: 0.7 }}
-            title="View Champion/Challenger status"
-          >
-            ⚔️ C/C
-          </Link>
-        )}
-      </div>
+      )}
     </div>
   )
 }

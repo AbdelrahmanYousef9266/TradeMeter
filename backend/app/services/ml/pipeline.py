@@ -7,7 +7,8 @@ live-serving Champion.  Every 100 bars the better P&L wins.
 
 Personal model (model 9) is kept as-is — no CC wrapper needed.
 
-predict_all() → Champion predictions + opens simulated trades (async for convenience)
+predict_all() → Champion predictions; buffers signals to open at the NEXT bar's
+                open (both a live Champion book and a silent Challenger book)
 learn_all()   → updates open trades, learns from closed ones, checks CC evaluations
 """
 
@@ -22,7 +23,7 @@ import asyncpg
 import redis.asyncio as aioredis
 
 from app.core.config import settings
-from app.services.ml.models.base import ModelPrediction
+from app.services.ml.models.base import ModelPrediction, ml_features
 from app.services.ml.models.scalper       import ScalperModel
 from app.services.ml.models.momentum      import MomentumModel
 from app.services.ml.models.mean_reversion import MeanReversionModel
@@ -36,6 +37,7 @@ from app.services.ml.xp                  import XPTracker, LevelUpEvent, level_t
 from app.services.ml.drift               import DriftDetector
 from app.services.ml.trade_tracker       import TradeManager
 from app.services.ml.champion_challenger import ChampionChallenger
+from app.services.ml.lstm_model          import LSTMModel
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +54,10 @@ MODEL_REGISTRY: dict[str, type] = {
     "contrarian":     ContrarianModel,
 }
 
-ALL_MODEL_NAMES = list(MODEL_REGISTRY.keys()) + ["personal"]
+# 8 CC personality models + personal + the batch-trained LSTM (Model 11).
+# lstm is included here so it participates in XP, levels, and the leaderboard,
+# but it is NOT in MODEL_REGISTRY (no Champion/Challenger — it's batch-trained).
+ALL_MODEL_NAMES = list(MODEL_REGISTRY.keys()) + ["personal", "lstm"]
 
 
 # ── Pipeline class ─────────────────────────────────────────────────────────
@@ -73,6 +78,10 @@ class MLPipeline:
         # Personal model — no CC, keeps its own blend logic
         self.personal = PersonalModel(user_id)
 
+        # LSTM (Model 11) — batch-trained, inference-only. No CC.
+        # Loads its trained weights from model_state in get_pipeline().
+        self.lstm = LSTMModel(user_id)
+
         # XP tracker per model
         self.xp_trackers: dict[str, XPTracker] = {
             name: XPTracker(user_id, name, **initial_levels.get(name, {}))
@@ -91,24 +100,41 @@ class MLPipeline:
             for name in ALL_MODEL_NAMES
         }
 
+        # Champion (live) trade book — its outcomes drive the dashboard + XP.
         self.trade_manager = TradeManager(user_id)
+        # Challenger (silent) shadow book — lets each Challenger accumulate its
+        # OWN P&L from its OWN signals so it can genuinely out/under-perform the
+        # Champion. Without this the two P&Ls are identical and no promotion can
+        # ever happen.
+        self.challenger_trade_manager = TradeManager(user_id)
+
+        # Signals buffered this bar, opened at the NEXT bar's real open (see
+        # predict_all). Filling at the current bar's open while the signal was
+        # derived from the current bar's close would be look-ahead bias.
+        self._pending_champion:   list[dict] = []
+        self._pending_challenger: list[dict] = []
+
         self.bar_count = 0
 
     # ── Prediction ────────────────────────────────────────────────────────
 
     async def predict_all(
         self,
-        features:      dict,
-        last_close:    float,
-        next_bar_open: Optional[float] = None,
-        bar_time:      Optional[object] = None,
+        features:         dict,
+        last_close:       float,
+        current_bar_open: Optional[float] = None,
+        bar_time:         Optional[object] = None,
     ) -> dict[str, ModelPrediction]:
         """
         Run all 9 models.  Champion predictions go to dashboard.
-        Challenger predictions run silently for warmup.
+        Challenger predictions run silently and open their own shadow trades.
 
-        If next_bar_open and bar_time are provided, opens simulated trades
-        for every non-HOLD signal using the Champion's ATR multipliers.
+        Trade-entry timing (look-ahead-free):
+          `current_bar_open` is the open of the bar being processed NOW. Signals
+          buffered on the *previous* bar are filled at this open (the genuinely
+          next bar after the signal), then this bar's signals are buffered to be
+          filled at the *next* bar's open. A signal derived from a bar's close
+          must never fill at that same bar's open.
         """
         predictions: dict[str, ModelPrediction] = {}
 
@@ -126,29 +152,65 @@ class MLPipeline:
             features, predictions, self.level_ranks
         )
 
-        # Open simulated trades for non-HOLD signals
-        if next_bar_open is not None and bar_time is not None:
-            atr = features.get("atr_14", 1.0)
-            for name, pred in predictions.items():
-                if pred.signal != "HOLD":
-                    cc = self.cc_models.get(name)
-                    if cc:
-                        params = cc.champion.params
-                    else:
-                        params = self.personal.get_settings()
-                    self.trade_manager.open_trade(
-                        model_name      = name,
-                        signal          = pred.signal,
-                        next_bar_open   = next_bar_open,
-                        atr             = atr,
-                        atr_stop_mult   = params.get("atr_stop_mult",   1.5),
-                        atr_target_mult = params.get("atr_target_mult", 3.0),
-                        confidence      = pred.confidence,
-                        features        = features,
-                        bar_time        = bar_time,
-                    )
+        # LSTM (Model 11) — inference only. Feeds its rolling window every bar
+        # (even when dormant) and returns HOLD until trained + window full.
+        predictions["lstm"] = self.lstm.predict(features, last_close)
+
+        if current_bar_open is not None and bar_time is not None:
+            # 1. Fill signals buffered on the PREVIOUS bar at THIS bar's real open.
+            self._fill_pending_trades(current_bar_open, bar_time)
+            # 2. Buffer THIS bar's signals — they fill at the NEXT bar's open.
+            self._buffer_pending_trades(predictions, features)
 
         return predictions
+
+    # ── Trade-entry buffering (deferred fill — avoids look-ahead) ───────────
+
+    def _fill_pending_trades(self, bar_open: float, bar_time: object) -> None:
+        """Open all buffered signals at *bar_open* (the actual next-bar open)."""
+        for spec in self._pending_champion:
+            self.trade_manager.open_trade(next_bar_open=bar_open, bar_time=bar_time, **spec)
+        self._pending_champion = []
+
+        for spec in self._pending_challenger:
+            self.challenger_trade_manager.open_trade(next_bar_open=bar_open, bar_time=bar_time, **spec)
+        self._pending_challenger = []
+
+    def _buffer_pending_trades(self, predictions: dict, features: dict) -> None:
+        """Record this bar's non-HOLD signals for filling at the next bar's open."""
+        atr = features.get("atr_14", 1.0)
+
+        # Champion book: all live models (8 CC + personal + lstm).
+        for name, pred in predictions.items():
+            if pred.signal == "HOLD":
+                continue
+            cc     = self.cc_models.get(name)
+            params = cc.champion.params if cc else self.personal.get_settings()
+            self._pending_champion.append({
+                "model_name":      name,
+                "signal":          pred.signal,
+                "atr":             atr,
+                "atr_stop_mult":   params.get("atr_stop_mult",   1.5),
+                "atr_target_mult": params.get("atr_target_mult", 3.0),
+                "confidence":      pred.confidence,
+                "features":        features,
+            })
+
+        # Challenger book: the 8 CC models' own (silent) signals.
+        for name, cc in self.cc_models.items():
+            cpred = getattr(cc, "last_challenger_pred", None)
+            if cpred is None or cpred.signal == "HOLD":
+                continue
+            params = cc.challenger.params
+            self._pending_challenger.append({
+                "model_name":      name,
+                "signal":          cpred.signal,
+                "atr":             atr,
+                "atr_stop_mult":   params.get("atr_stop_mult",   1.5),
+                "atr_target_mult": params.get("atr_target_mult", 3.0),
+                "confidence":      cpred.confidence,
+                "features":        features,
+            })
 
     # ── Learning ──────────────────────────────────────────────────────────
 
@@ -165,11 +227,13 @@ class MLPipeline:
         redis_client: aioredis.Redis,
     ) -> list[LevelUpEvent]:
         """
-        Phase 6A learning:
-        1. Update open simulated trades (check target/stop/timeout)
-        2. For each closed trade: CC.learn() + XP award
-        3. Check CC evaluations every 100 bars (may promote Challenger)
-        4. Persist levels and promotions
+        Two-layer learning:
+        1. Baseline (every bar): each model learns the realized direction, so
+           bars_learned advances every bar and the classifiers escape the
+           "HOLD 50%" deadlock (HOLD → no trades → no closes → no learning).
+        2. Refinement (on trade close): P&L-based learning + bonus XP.
+        3. Check CC evaluations every 100 bars (may promote Challenger).
+        4. Persist levels and promotions.
         """
         # ── 1. Update open trades ─────────────────────────────────────────
         closed_trades = self.trade_manager.update_all(
@@ -178,7 +242,39 @@ class MLPipeline:
 
         level_up_events: list[LevelUpEvent] = []
 
-        # ── 2. Learn from closed trades ────────────────────────────────────
+        # ── 2. Baseline per-bar learning (Level 1) ─────────────────────────
+        # Every learning model trains on the realized direction on EVERY bar.
+        # `features` is the PREVIOUS bar's feature vector (the inputs that
+        # produced `predictions`); actual_direction is what price then did.
+        actual_direction = 1 if actual_close > prev_close else 0
+
+        for name, cc in self.cc_models.items():
+            # Train both Champion and Challenger classifiers on the realized
+            # direction — this is what moves them off the default 0.5 output.
+            for model_obj in (cc._champion_model_obj, cc._challenger_model_obj):
+                try:
+                    model_obj.classifier.learn_one(ml_features(features), actual_direction)
+                except Exception:
+                    pass
+            self._baseline_award(name, predictions.get(name), actual_direction, level_up_events)
+
+        # Personal model — baseline direction learning + XP
+        try:
+            self.personal.learn_from_bar(features, actual_direction, {})
+        except Exception:
+            pass
+        self._baseline_award("personal", predictions.get("personal"), actual_direction, level_up_events)
+
+        # LSTM (Model 11) is batch-trained, not online — it has no per-bar weights
+        # to update here. Advance its bars_learned/XP only once it is actually
+        # trained and predicting live, so the dashboard reflects real activity
+        # instead of a frozen 0 (and no phantom bars accrue while it is dormant).
+        if self.lstm.is_trained:
+            self._baseline_award("lstm", predictions.get("lstm"), actual_direction, level_up_events)
+
+        # ── 3. Trade-close refinement (Level 3 P&L) ────────────────────────
+        # bars_learned and streak are owned by the baseline above; this layer
+        # only adds P&L-based classifier learning and bonus XP.
         for trade in closed_trades:
             trade_outcome = {
                 "signal":      trade.signal,
@@ -196,20 +292,15 @@ class MLPipeline:
             else:
                 cc = self.cc_models.get(trade.model_name)
                 if cc:
-                    cc.learn(trade_outcome)
+                    cc.learn_champion(trade_outcome)
 
             tracker = self.xp_trackers.get(trade.model_name)
             if tracker:
                 if trade.won:
-                    tracker.streak += 1
                     tracker.xp = max(0, tracker.xp + 10 + int(abs(trade.pnl_points or 0) * 2))
-                elif trade.exit_reason == "timeout":
-                    tracker.xp = max(0, tracker.xp + 1)
-                    # Timeout is neutral — streak unchanged
-                else:
-                    tracker.streak = 0
+                elif trade.exit_reason != "timeout":
                     tracker.xp = max(0, tracker.xp - 5)
-                tracker.bars_learned += 1
+                # timeout is neutral — no XP change
 
                 event = tracker._check_level_up()
                 if event:
@@ -218,7 +309,26 @@ class MLPipeline:
 
             await self._save_trade(db_conn, trade)
 
-        # ── 3. Champion/Challenger evaluations ─────────────────────────────
+        # ── 3b. Challenger shadow-book refinement (silent) ─────────────────
+        # The Challenger's own trades close here and feed ONLY the Challenger
+        # model + its P&L tally. No XP, no DB rows — it never touches the
+        # dashboard until (and unless) it wins an evaluation and is promoted.
+        challenger_closed = self.challenger_trade_manager.update_all(
+            bar_high, bar_low, actual_close, bar_time
+        )
+        for trade in challenger_closed:
+            cc = self.cc_models.get(trade.model_name)
+            if cc:
+                cc.learn_challenger({
+                    "signal":      trade.signal,
+                    "features":    trade.features,
+                    "pnl_points":  trade.pnl_points or 0.0,
+                    "won":         trade.won,
+                    "exit_price":  trade.exit_price,
+                    "exit_reason": trade.exit_reason,
+                })
+
+        # ── 4. Champion/Challenger evaluations ─────────────────────────────
         for name, cc in self.cc_models.items():
             promotion = cc.maybe_evaluate()
             if promotion:
@@ -239,7 +349,7 @@ class MLPipeline:
                     pass
                 await self._save_promotion(db_conn, promotion)
 
-        # ── 4. Persist levels ──────────────────────────────────────────────
+        # ── 5. Persist levels ──────────────────────────────────────────────
         await self._save_levels(db_conn)
 
         self.bar_count += 1
@@ -249,6 +359,31 @@ class MLPipeline:
             await self.save_state(db_conn)
 
         return level_up_events
+
+    def _baseline_award(
+        self,
+        name: str,
+        pred: Optional[ModelPrediction],
+        actual_direction: int,
+        level_up_events: list,
+    ) -> None:
+        """
+        Award baseline per-bar XP for one model via the Level-1 award logic
+        (handles base XP, direction-correctness XP, streak, bars_learned, and
+        level-up). Called on every bar so bars_learned always advances.
+        """
+        tracker = self.xp_trackers.get(name)
+        if not tracker:
+            return
+        if pred is not None:
+            event = tracker.award(pred.direction_up, actual_direction, 0.0, 0.0)
+        else:
+            # No prior prediction to score — still count the bar as learned
+            tracker.bars_learned += 1
+            event = tracker._check_level_up()
+        if event:
+            self.level_ranks[name] = event.new_rank
+            level_up_events.append(event)
 
     def get_cc_status(self) -> dict:
         """Returns CC status for all 8 personality models."""
@@ -438,18 +573,33 @@ async def get_pipeline(user_id: str, db_conn: asyncpg.Connection) -> MLPipeline:
 
         # Restore persisted River weights so learning survives restarts.
         # Falls back to fresh models on any load/unpickle failure.
+        # The 'lstm' row uses a different (PyTorch) format and is loaded
+        # separately below, so it is excluded from restore_state here.
         try:
             state_rows = await db_conn.fetch(
                 "SELECT model_name, state FROM model_state WHERE user_id = $1",
                 _uuid.UUID(user_id),
             )
-            if state_rows:
-                saved = {r["model_name"]: r["state"] for r in state_rows}
+            saved = {r["model_name"]: r["state"] for r in state_rows or []}
+
+            lstm_blob = saved.pop("lstm", None)
+
+            if saved:
                 n = pipeline.restore_state(saved)
                 logger.info(
-                    "get_pipeline: restored %d/%d model states for user %s",
+                    "get_pipeline: restored %d/%d River model states for user %s",
                     n, len(saved), user_id,
                 )
+
+            if lstm_blob is not None:
+                try:
+                    pipeline.lstm.load(lstm_blob)
+                    logger.info("get_pipeline: restored trained LSTM for user %s", user_id)
+                except Exception as exc:
+                    logger.warning(
+                        "get_pipeline: LSTM load failed for %s (%s) — staying untrained",
+                        user_id, exc,
+                    )
         except Exception as exc:
             logger.warning(
                 "get_pipeline: model_state load failed for %s (%s) — using fresh models",

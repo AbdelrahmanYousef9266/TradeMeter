@@ -230,3 +230,49 @@ After multipliers are applied, weights are renormalized to sum to 1.0. A Master-
 ### Dashboard Notifications
 
 When a model levels up, `pipeline.py` publishes a `level_up` event to the Redis pub/sub channel `live:{user_id}`. The WebSocket broadcaster forwards it to the browser, where a toast notification plays a level-up animation on the relevant model card.
+
+---
+
+## Model 11 — Deep LSTM
+
+Model 11 is fundamentally different from models 1–10. It is a **PyTorch LSTM** that learns multi-bar **sequence** patterns the per-bar River models cannot capture.
+
+| Aspect | River models (1–10) | LSTM (Model 11) |
+|--------|---------------------|-----------------|
+| Learning | Online — `learn_one()` every bar | Batch — trained on full history |
+| When it learns | Continuously, live | Nightly (2 AM ET) + manual button |
+| Input | Single bar's 16 features | **50-bar sequence** of 16 features |
+| Prediction | Every bar, always | Live inference, **only when trained** |
+| Persistence | Pickled River objects | Pickled `state_dict` + normalization stats |
+
+### Architecture
+
+- `nn.LSTM` with 2 layers, hidden size 64, dropout 0.2, over `(batch, 50, 16)` sequences.
+- A small head (`Linear 64→32 → ReLU → Dropout → Linear 32→3`) classifies the final timestep into **SELL / HOLD / BUY**.
+- Inputs are normalized using the per-feature mean/std computed at training time (stored alongside the weights).
+
+### Training
+
+- **Data**: all of the user's bar closes from TimescaleDB (`ticks`), with features recomputed in chronological order using the same `FeatureEngine` as live.
+- **Labels**: for a sequence ending at bar *t*, look at the next bar — BUY if `close[t+1] − close[t] > 0.5·ATR`, SELL if `< −0.5·ATR`, else HOLD.
+- **Imbalance**: class-weighted `CrossEntropyLoss` (HOLD is usually most common).
+- **Split**: chronological 80/20 train/validation; validation accuracy is reported back to the dashboard.
+- Trained weights are saved to the shared `model_state` table under `model_name = 'lstm'` and reloaded into the live pipeline immediately.
+
+### Dormancy
+
+The LSTM stays **dormant** until **2000 bars** of history exist. While dormant it:
+- Makes **no predictions** (returns HOLD with confidence 0), so it opens no trades.
+- Still feeds its rolling 50-bar window every bar, so the moment it is trained it has a full window ready for inference.
+- Shows "🧬 Collecting data — X / 2000 bars" with a progress bar on its dashboard card.
+
+### Triggers
+
+1. **Nightly** — a background task in `main.py` retrains every active user's LSTM around 2 AM ET.
+2. **Manual** — `POST /models/lstm/train` (the "Train now / Retrain" button). Status comes from `GET /models/lstm/status`.
+
+### Leaderboard & XP
+
+Model 11 opens simulated trades and competes on **P&L** like every other model, and earns **XP** from winning trades. It does **not** use Champion/Challenger (there are no per-bar hyperparameters to mutate — it is batch-trained), and it has no online weights to reset (`reset` and `settings` endpoints return 400 for `lstm`; use `train` instead).
+
+> Note: torch runs on **CPU** — no GPU is required at this scale. See `docs/SETUP.md`.

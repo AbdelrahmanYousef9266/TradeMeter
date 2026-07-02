@@ -20,6 +20,13 @@
 
   --accent:          #5271ff;
   --accent-dim:      rgba(82, 113, 255, 0.15);
+
+  /* Aliases / tokens used by the model cards */
+  --text-muted:      #565b66;          /* de-emphasized labels (= text-tertiary) */
+  --border-accent:   var(--accent);    /* highlighted card border (personal) */
+  --border-strong:   #33373f;          /* slightly stronger than --border */
+  --fill-accent:     var(--accent);    /* XP bar fill */
+  --radius:          8px;              /* default inner radius */
 }
 
 *, *::before, *::after {

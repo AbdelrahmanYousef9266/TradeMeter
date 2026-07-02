@@ -76,8 +76,20 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
+**PyTorch (Model 11 — Deep LSTM):** `requirements.txt` pulls in `torch`. The
+default `pip install torch` may grab a large CUDA build. This project only needs
+the **CPU** build — there is no GPU requirement at this scale (training 2000+ bars
+for 20 epochs takes well under a minute on CPU). If you want the smaller CPU-only
+wheels, install torch separately first:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+```
+
 On first startup:
 - All 10 River models are initialized with empty weights and begin learning immediately from the first bar
+- Model 11 (LSTM) starts **dormant** and shows "Collecting data" until 2000 bars exist, then trains nightly (2 AM ET) or on demand via the dashboard "Train now" button
 - Each user's personal model (Model 9 or 10) is created automatically on first login
 - The `create_hypertable()` call in `database.py` is safe to run multiple times (no-op if already created)
 

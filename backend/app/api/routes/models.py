@@ -147,30 +147,107 @@ async def leaderboard_pnl(
 ) -> list[dict]:
     """Models ranked by today's simulated P&L (Level 3 trade outcomes)."""
     pipeline = _pipelines.get(str(user.id))
-
-    if pipeline:
-        session_pnl   = pipeline.trade_manager.get_session_pnl()
-        closed_trades = pipeline.trade_manager.closed_trades
-    else:
-        session_pnl   = {}
-        closed_trades = []
+    tm = pipeline.trade_manager if pipeline else None
 
     result = []
     for name in ALL_MODEL_NAMES:
-        pnl        = session_pnl.get(name, 0.0)
-        trade_count = sum(1 for t in closed_trades if t.model_name == name)
-        wins        = sum(1 for t in closed_trades if t.model_name == name and t.won)
+        stats = tm.get_session_stats(name) if tm else {
+            "points": 0.0, "wins": 0, "losses": 0, "trades": 0
+        }
+        trade_count = stats["trades"]
+        wins        = stats["wins"]
         win_rate    = round(wins / trade_count, 3) if trade_count else 0.0
         result.append({
             "model_name":  name,
-            "pnl_points":  round(pnl, 2),
-            "pnl_dollars": round(pnl * 5.0, 2),
+            "pnl_points":  round(stats["points"], 2),
+            "pnl_dollars": round(stats["points"] * 5.0, 2),
             "trade_count": trade_count,
             "win_rate":    win_rate,
         })
 
     result.sort(key=lambda x: x["pnl_points"], reverse=True)
     return result
+
+
+# ── LSTM (Model 11) — training + status ───────────────────────────────────────
+# Defined before the generic /{model_name} routes for clarity. The path
+# suffixes (train/status) are unique so there is no routing clash.
+
+@router.post("/lstm/train")
+async def train_lstm_endpoint(
+    user: User = Depends(get_current_user),
+    conn       = Depends(get_db),
+) -> dict:
+    """Manually trigger LSTM batch training on the user's full history."""
+    from app.services.ml.lstm_trainer import train_lstm, count_available_bars
+    from app.services.ml.lstm_model import MIN_BARS_TO_ACTIVATE
+
+    bars = await count_available_bars(conn, str(user.id))
+    if bars < MIN_BARS_TO_ACTIVATE:
+        return {
+            "success":        False,
+            "reason":         "insufficient_data",
+            "bars_available": bars,
+            "bars_needed":    MIN_BARS_TO_ACTIVATE,
+            "message":        f"Need {MIN_BARS_TO_ACTIVATE - bars} more bars before training",
+        }
+
+    # Train (CPU, synchronous — typically under a minute on 2000+ bars)
+    result = await train_lstm(conn, str(user.id))
+
+    # Reload the freshly-trained weights into the live pipeline, if loaded
+    pipeline = _pipelines.get(str(user.id))
+    if pipeline and result.get("success"):
+        try:
+            row = await conn.fetchrow(
+                "SELECT state FROM model_state WHERE user_id=$1 AND model_name='lstm'",
+                user.id,
+            )
+            if row:
+                pipeline.lstm.load(row["state"])
+        except Exception as exc:
+            logger.warning("train_lstm: reload into live pipeline failed: %s", exc)
+
+    return result
+
+
+@router.get("/lstm/status")
+async def lstm_status(
+    user: User = Depends(get_current_user),
+    conn       = Depends(get_db),
+) -> dict:
+    """LSTM training status and data-availability progress."""
+    from app.services.ml.lstm_trainer import count_available_bars
+    from app.services.ml.lstm_model import MIN_BARS_TO_ACTIVATE
+
+    try:
+        bars = await count_available_bars(conn, str(user.id))
+    except Exception as exc:
+        logger.warning("lstm_status: bar count failed: %s", exc)
+        bars = 0
+
+    pipeline = _pipelines.get(str(user.id))
+    is_trained = False
+    last_trained = None
+    train_accuracy = None
+    train_samples = None
+    if pipeline:
+        lstm = pipeline.lstm
+        is_trained = lstm.is_trained
+        last_trained = lstm.last_trained.isoformat() if lstm.last_trained else None
+        train_accuracy = lstm.train_accuracy
+        train_samples = lstm.train_samples
+
+    return {
+        "is_trained":     is_trained,
+        "is_dormant":     bars < MIN_BARS_TO_ACTIVATE,
+        "bars_available": bars,
+        "bars_needed":    MIN_BARS_TO_ACTIVATE,
+        "progress_pct":   min(round(bars / MIN_BARS_TO_ACTIVATE * 100, 1), 100),
+        "last_trained":   last_trained,
+        "train_accuracy": train_accuracy,
+        "train_samples":  train_samples,
+    }
 
 
 # ── Single model level ────────────────────────────────────────────────────────
@@ -271,6 +348,11 @@ async def update_settings(
     that is locked at the model's current rank.
     """
     _validate_model_name(model_name)
+    if model_name == "lstm":
+        raise HTTPException(
+            400, "LSTM is batch-trained and has no tunable per-bar settings. "
+                 "Use POST /models/lstm/train to retrain it.",
+        )
     _validate_settings_values(new_settings)
     pipeline = await get_pipeline(str(user.id), conn)
     rank     = pipeline.level_ranks[model_name]
@@ -298,6 +380,11 @@ async def reset_model(
 ) -> dict:
     """Reset River model weights.  Level and XP are preserved."""
     _validate_model_name(model_name)
+    if model_name == "lstm":
+        raise HTTPException(
+            400, "LSTM is batch-trained — it has no online weights to reset. "
+                 "Use POST /models/lstm/train to retrain it from history.",
+        )
     pipeline = await get_pipeline(str(user.id), conn)
     _get_model(pipeline, model_name).reset()
     pipeline.drift_detectors[model_name].reset()

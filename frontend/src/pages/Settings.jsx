@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import useStore from '../store'
 import IndicatorToggles from '../components/settings/IndicatorToggles'
 import StrategyConfig   from '../components/settings/StrategyConfig'
+import DataCoverageCalendar from '../components/DataCoverageCalendar'
 import { resetModel } from '../services/api'
 
 const ALL_MODELS = [
@@ -61,6 +62,17 @@ export default function Settings() {
           indicators={settings.indicators}
           onChange={inds => setSettings({ ...settings, indicators: inds })}
         />
+      </div>
+
+      {/* Data coverage */}
+      <div style={{ ...card, marginBottom: 12 }}>
+        <p style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          Data Coverage
+        </p>
+        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
+          Days with collected market data, colored by bar volume
+        </p>
+        <DataCoverageCalendar />
       </div>
 
       {/* Save */}

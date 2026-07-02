@@ -69,13 +69,17 @@ function startMock({ setBar, updateModelSignal, updateModelLevel, pushLevelUp, s
   return () => { clearInterval(barInterval); clearInterval(lueInterval) }
 }
 
-export function useWebSocket() {
+export function useWebSocket(enabled = true) {
   const ws = useRef(null)
   const reconnectDelay = useRef(1000)
   const isMounted = useRef(false)
-  const { setBar, setCurrentBar, updateModelSignal, updateModelLevel, pushLevelUp, setNtConnected, setWarmup } = useStore()
+  const { setBar, setCurrentBar, updateModelSignal, updateModelLevel, updateModelPnl, pushLevelUp, setNtConnected, setWarmup } = useStore()
 
   useEffect(() => {
+    // Only connect when enabled (e.g. authenticated). When disabled this hook
+    // mounts but opens no socket; it connects once `enabled` flips true.
+    if (!enabled) return
+
     if (MOCK) return startMock({ setBar, updateModelSignal, updateModelLevel, pushLevelUp, setNtConnected, setWarmup })
 
     isMounted.current = true
@@ -122,6 +126,9 @@ export function useWebSocket() {
             if (msg.levels) {
               Object.entries(msg.levels).forEach(([name, level]) => updateModelLevel(name, level))
             }
+            if (msg.session_pnl) {
+              Object.entries(msg.session_pnl).forEach(([name, pnl]) => updateModelPnl(name, pnl))
+            }
           }
 
           if (msg.type === 'level_up') pushLevelUp(msg)
@@ -151,5 +158,5 @@ export function useWebSocket() {
       isMounted.current = false
       ws.current?.close()
     }
-  }, [])
+  }, [enabled])
 }

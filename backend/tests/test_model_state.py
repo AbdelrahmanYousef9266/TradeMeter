@@ -47,7 +47,7 @@ def _train(pipeline: MLPipeline, rounds: int = 30) -> None:
         close = 5840.0 + i
         for name, cc in pipeline.cc_models.items():
             cc.predict(FEATS, close)
-            cc.learn({
+            cc.learn_champion({
                 "signal":      "BUY",
                 "features":    FEATS,
                 "pnl_points":  4.0,

@@ -8,7 +8,8 @@ class User(BaseModel):
     email: str
     google_id: str
     nt_token_hash: str | None = None
-    nt_token_prefix: str | None = None
+    nt_token_prefix: str | None = None   # masked display value only (e.g. "TM-••••")
+    nt_token_lookup: str | None = None   # SHA-256 hex lookup index — never the plaintext
     nt_connected: bool = False
     nt_last_seen: datetime | None = None
     created_at: datetime

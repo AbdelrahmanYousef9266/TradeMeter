@@ -30,11 +30,18 @@ export const getLeaderboardLvl = ()           => api.get('/models/leaderboard/le
 export const getModelHistory   = (name, p)   => api.get(`/models/${name}/history`, { params: p })
 
 export const getHistory            = (params) => api.get('/market/history',      { params })
+export const getMarketStatus       = ()       => api.get('/market/status')
+export const getRecentBars         = (limit = 200) => api.get(`/market/bars?limit=${limit}`)
+export const getDataCoverage       = ()       => api.get('/market/coverage')
 export const getPredictionsHistory = (params) => api.get('/predictions/history', { params })
 export const getLatestPredictions  = ()       => api.get('/predictions/latest')
 
 export const getCCStatus    = ()     => api.get('/cc')
 export const getModelCC     = (name) => api.get(`/cc/${name}`)
 export const forceEvaluation = (name) => api.post(`/cc/${name}/evaluate`)
+
+// Model 11 — Deep LSTM
+export const getLSTMStatus = () => api.get('/models/lstm/status')
+export const trainLSTM     = () => api.post('/models/lstm/train')
 
 export default api

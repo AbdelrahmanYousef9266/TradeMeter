@@ -12,7 +12,7 @@ from collections import deque
 
 from river import linear_model, optim
 
-from app.services.ml.models.base import ModelPrediction
+from app.services.ml.models.base import ModelPrediction, ml_features
 from app.services.ml.ensemble import compute_blend_weights
 
 
@@ -73,7 +73,7 @@ class PersonalModel:
 
         # Own classifier's probability
         try:
-            own_proba = self.user_classifier.predict_proba_one(features)
+            own_proba = self.user_classifier.predict_proba_one(ml_features(features))
             own_up    = own_proba.get(1, 0.5) if own_proba else 0.5
         except Exception:
             own_up = 0.5
@@ -118,7 +118,7 @@ class PersonalModel:
             if name in self.rolling_accuracy:
                 self.rolling_accuracy[name].append(1 if correct else 0)
         try:
-            self.user_classifier.learn_one(features, label)
+            self.user_classifier.learn_one(ml_features(features), label)
         except Exception:
             pass
         self.bar_count += 1
@@ -133,7 +133,7 @@ class PersonalModel:
         label = 1 if (user_signal == "BUY" and outcome == 1) or \
                      (user_signal == "SELL" and outcome == 0) else 0
         try:
-            self.user_classifier.learn_one(features, label)
+            self.user_classifier.learn_one(ml_features(features), label)
         except Exception:
             pass
 
