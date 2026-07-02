@@ -30,6 +30,8 @@ from app.api.routes.market              import router as market_router
 from app.api.routes.predictions         import router as predictions_router
 from app.api.routes.models              import router as models_router
 from app.api.routes.champion_challenger import router as cc_router
+from app.api.routes.training            import router as training_router
+from app.api.routes.system              import router as system_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -169,6 +171,8 @@ app.include_router(market_router,       prefix="/market",      tags=["market"])
 app.include_router(predictions_router,  prefix="/predictions", tags=["predictions"])
 app.include_router(models_router,       prefix="/models",      tags=["models"])
 app.include_router(cc_router,           prefix="/cc",          tags=["champion-challenger"])
+app.include_router(training_router,     prefix="/training",    tags=["training"])
+app.include_router(system_router,       prefix="/system",      tags=["system"])
 
 
 @app.get("/health", tags=["system"])

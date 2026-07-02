@@ -50,4 +50,7 @@ export const startTraining     = () => api.post('/training/start')
 export const stopTraining      = () => api.post('/training/stop')
 export const getTrainingStatus = () => api.get('/training/status')
 
+// System resources — real CPU/RAM for the AI Lab stream panel
+export const getSystemStats    = () => api.get('/system/stats')
+
 export default api

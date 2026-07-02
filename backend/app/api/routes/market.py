@@ -47,6 +47,7 @@ async def get_history(
              AND  symbol  = $2
              AND  time   >= $3
              AND  time   <= $4
+             AND  is_training = false
            ORDER  BY time ASC
            LIMIT  $5""",
         user.id, symbol, from_ts, to_ts, limit,
@@ -124,6 +125,7 @@ async def recent_bars(
                FROM   ticks
                WHERE  user_id = $1
                  AND  bar_type != 'tick'
+                 AND  is_training = false
                ORDER  BY time DESC
                LIMIT  $2""",
             user.id, limit,
@@ -167,6 +169,7 @@ async def data_coverage(
                FROM   ticks
                WHERE  user_id = $1
                  AND  bar_type != 'tick'
+                 AND  is_training = false
                GROUP  BY date_trunc('day', time)::date
                ORDER  BY day ASC""",
             user.id,

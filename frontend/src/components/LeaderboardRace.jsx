@@ -9,7 +9,7 @@ const MODEL_META = {
   aggressive:     { label: 'Aggressive',     abbr: 'AG', color: '#E24B4A' },
   volume:         { label: 'Volume',         abbr: 'VO', color: '#7F77DD' },
   contrarian:     { label: 'Contrarian',     abbr: 'CN', color: '#D4537E' },
-  personal:       { label: 'You',            abbr: 'YO', color: '#378ADD' },
+  personal:       { label: 'Secret',         abbr: 'SE', color: '#378ADD' },
   lstm:           { label: 'Deep LSTM',      abbr: 'DL', color: '#534AB7' },
 }
 

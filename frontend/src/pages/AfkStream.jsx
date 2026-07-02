@@ -1,322 +1,340 @@
 import { useState, useEffect, useMemo } from 'react'
 import useStore from '../store'
-import { getLSTMStatus } from '../services/api'
-import LeaderboardRace from '../components/LeaderboardRace'
+import { getSystemStats, getTrainingStatus, getLSTMStatus } from '../services/api'
 import ArchitectureDiagram from '../components/ArchitectureDiagram'
 
+// Monospace stack for the control-panel look.
+const MONO = "ui-monospace, 'JetBrains Mono', 'SF Mono', 'Cascadia Code', Menlo, Consolas, monospace"
+
+// Bar colors per resource.
+const C_CPU = '#1D9E75'   // green
+const C_RAM = '#378ADD'   // blue
+const C_GPU = '#E0912F'   // amber
+
 const MODEL_META = {
-  momentum:       { label: 'Momentum',       abbr: 'MO', color: '#1D9E75' },
-  breakout:       { label: 'Breakout',       abbr: 'BR', color: '#BA7517' },
-  volume:         { label: 'Volume',         abbr: 'VO', color: '#7F77DD' },
-  personal:       { label: 'You',            abbr: 'YO', color: '#378ADD' },
-  mean_reversion: { label: 'Mean Reversion', abbr: 'MR', color: '#D85A30' },
-  aggressive:     { label: 'Aggressive',     abbr: 'AG', color: '#E24B4A' },
-  conservative:   { label: 'Conservative',   abbr: 'CO', color: '#639922' },
-  scalper:        { label: 'Scalper',        abbr: 'SC', color: '#3B82C4' },
-  contrarian:     { label: 'Contrarian',     abbr: 'CN', color: '#D4537E' },
-  lstm:           { label: 'Deep LSTM',      abbr: 'DL', color: '#534AB7' },
+  scalper:        { label: 'Scalper',       color: '#3B82C4' },
+  momentum:       { label: 'Momentum',      color: '#1D9E75' },
+  mean_reversion: { label: 'Mean Reversion',color: '#D85A30' },
+  breakout:       { label: 'Breakout',      color: '#BA7517' },
+  conservative:   { label: 'Conservative',  color: '#639922' },
+  aggressive:     { label: 'Aggressive',    color: '#E24B4A' },
+  volume:         { label: 'Volume',        color: '#7F77DD' },
+  contrarian:     { label: 'Contrarian',    color: '#D4537E' },
+  personal:       { label: 'Secret',        color: '#378ADD' },
+  lstm:           { label: 'Deep LSTM',     color: '#534AB7' },
 }
 const MODEL_NAMES = Object.keys(MODEL_META)
 
+// US equity RTH: weekdays 09:30–16:00 ET. Uses the browser's Intl DB for an
+// accurate ET conversion (handles DST) rather than a fixed offset.
+function isMarketOpen() {
+  const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }))
+  const day = et.getDay()                 // 0 Sun … 6 Sat
+  const mins = et.getHours() * 60 + et.getMinutes()
+  return day >= 1 && day <= 5 && mins >= 570 && mins < 960
+}
+
 export default function AfkStream() {
-  const { modelSignals, modelLevels, modelPnl, currentBar, ntConnected } = useStore()
+  const { modelSignals, modelLevels, modelPnl, lastBarAt } = useStore()
 
-  // LSTM collection status — polled from the existing /models/lstm/status endpoint
-  const [lstmStatus, setLstmStatus] = useState(null)
+  const [sys, setSys]           = useState({ cpu_percent: 0, ram_used_gb: 0, ram_total_gb: 0, ram_percent: 0 })
+  const [training, setTraining] = useState(false)
+  const [lstm, setLstm]         = useState(null)
+  const [gpu, setGpu]           = useState(38)   // decorative — see below
+  const [now, setNow]           = useState(Date.now())
 
+  // ── Poll real CPU/RAM every 2s ─────────────────────────────────────────
   useEffect(() => {
     let active = true
-    const poll = async () => {
-      try {
-        const res = await getLSTMStatus()
-        if (active) setLstmStatus(res.data)
-      } catch (e) {
-        // silent — LSTM status is non-critical for the stream
-      }
-    }
+    const poll = () => getSystemStats().then(r => active && setSys(r.data)).catch(() => {})
     poll()
-    const interval = setInterval(poll, 5000)  // poll every 5 seconds
-    return () => { active = false; clearInterval(interval) }
+    const id = setInterval(poll, 2000)
+    return () => { active = false; clearInterval(id) }
   }, [])
 
-  // Session stats
+  // ── Poll training status every 2s (drives Task + AI Status) ────────────
+  useEffect(() => {
+    let active = true
+    const poll = () => getTrainingStatus().then(r => active && setTraining(!!r.data?.training)).catch(() => {})
+    poll()
+    const id = setInterval(poll, 2000)
+    return () => { active = false; clearInterval(id) }
+  }, [])
+
+  // ── Poll LSTM status every 5s (drives "Collecting Data" task) ──────────
+  useEffect(() => {
+    let active = true
+    const poll = () => getLSTMStatus().then(r => active && setLstm(r.data)).catch(() => {})
+    poll()
+    const id = setInterval(poll, 5000)
+    return () => { active = false; clearInterval(id) }
+  }, [])
+
+  // ── Decorative GPU gauge ────────────────────────────────────────────────
+  // This system is CPU-only — there is no real GPU to read. We render a
+  // plausible slowly-drifting 30–45% value purely so the panel looks alive.
+  // NOT a real measurement.
+  useEffect(() => {
+    const id = setInterval(() => {
+      setGpu(g => Math.min(45, Math.max(30, g + (Math.random() - 0.5) * 3)))
+    }, 2000)
+    return () => clearInterval(id)
+  }, [])
+
+  // Tick every 2s so data-freshness (and thus market/AI status) re-evaluates
+  // promptly without waiting on a message.
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 2000)
+    return () => clearInterval(id)
+  }, [])
+
+  // ── Derived model stats (all from the live store) ──────────────────────
   const stats = useMemo(() => {
-    let totalPnl = 0, totalWins = 0, totalLosses = 0, maxBars = 0
+    let totalWins = 0, totalLosses = 0, samples = 0, predictions = 0
+    let leader = null, leaderPts = -Infinity
+    let bestAcc = null
+
+    const active = MODEL_NAMES.filter(n => modelSignals[n] || modelLevels[n])
+
     MODEL_NAMES.forEach(name => {
       const p = modelPnl[name] || {}
       const l = modelLevels[name] || {}
-      totalPnl += p.points ?? 0
-      totalWins += p.wins ?? 0
-      totalLosses += p.losses ?? 0
-      maxBars = Math.max(maxBars, l.bars_learned ?? 0)
-    })
-    const winRate = (totalWins + totalLosses) > 0
-      ? Math.round(totalWins / (totalWins + totalLosses) * 100) : 0
-    return { totalPnl, totalWins, totalLosses, maxBars, winRate }
-  }, [modelPnl, modelLevels])
+      const w = p.wins ?? 0, ls = p.losses ?? 0
+      totalWins += w
+      totalLosses += ls
+      samples += l.bars_learned ?? 0
+      predictions = Math.max(predictions, l.bars_learned ?? 0)
 
-  const price = currentBar?.close ?? null
+      const pts = p.points ?? 0
+      if (pts > leaderPts) { leaderPts = pts; leader = name }
+
+      if (w + ls > 0) {
+        const acc = w / (w + ls)
+        if (bestAcc === null || acc > bestAcc) bestAcc = acc
+      }
+    })
+
+    const overallWinRate = (totalWins + totalLosses) > 0
+      ? totalWins / (totalWins + totalLosses) : null
+
+    return {
+      activeCount: active.length || MODEL_NAMES.length,
+      leader: (leader && leaderPts !== 0) ? leader : null,
+      leaderPts,
+      bestAcc,
+      overallWinRate,
+      samples,
+      predictions,
+    }
+  }, [modelSignals, modelLevels, modelPnl])
+
+  // Most recent non-HOLD signal = highest-confidence live non-HOLD across models.
+  const lastSignal = useMemo(() => {
+    let best = null
+    MODEL_NAMES.forEach(name => {
+      const s = modelSignals[name]
+      if (s && s.signal && s.signal !== 'HOLD') {
+        if (!best || (s.confidence ?? 0) > (best.confidence ?? 0)) {
+          best = { signal: s.signal, confidence: s.confidence ?? 0 }
+        }
+      }
+    })
+    return best
+  }, [modelSignals])
+
+  // ── Derived status strings ──────────────────────────────────────────────
+  const task = training ? 'Training on History'
+    : (lstm && lstm.is_dormant) ? 'Collecting Data'
+    : 'Improve Accuracy'
+
+  // "Data is streaming" = a bar/tick arrived recently OR the WS is connected and
+  // a bar has been seen recently. This is what makes the panel honest during
+  // replay/training, when the wall clock is outside market hours but data flows.
+  const dataFlowing = lastBarAt > 0 && (now - lastBarAt) < 15000
+  const rthOpen     = isMarketOpen()
+
+  // AI Status follows the data, not the clock.
+  const aiStatus = training ? { label: 'Training', color: C_GPU }
+    : dataFlowing ? { label: 'Learning', color: C_CPU }
+    : { label: 'Idle', color: '#565b66' }
+
+  // Market status:
+  //   REPLAY — training on, OR data flowing while the real ET clock is outside
+  //            market hours (i.e. historical playback), shown in purple.
+  //   LIVE   — data flowing during real market hours.
+  //   OPEN   — market hours but no data currently streaming (feed idle).
+  //   CLOSED — no data flowing AND outside market hours.
+  const GREEN  = { color: C_CPU,     bg: '#1D9E7522' }
+  const PURPLE = { color: '#8b5cf6', bg: '#8b5cf622' }
+  const GREY   = { color: '#565b66', bg: '#ffffff08' }
+  let market
+  if (training || (dataFlowing && !rthOpen)) market = { text: 'REPLAY', ...PURPLE }
+  else if (dataFlowing)                      market = { text: 'LIVE',   ...GREEN }
+  else if (rthOpen)                          market = { text: 'OPEN',   ...GREEN }
+  else                                       market = { text: 'CLOSED', ...GREY }
+
+  const pct = (v) => v == null ? '—' : `${Math.round(v * 100)}%`
+  const num = (v) => (v ?? 0).toLocaleString()
 
   return (
     <div style={{
-      width: '100vw', height: '100vh', overflow: 'hidden',
-      background: 'var(--surface-0, #0e0f11)',
-      padding: '12px', display: 'flex', flexDirection: 'column', gap: '10px',
-      fontFamily: 'system-ui, -apple-system, sans-serif',
-      color: 'var(--text-primary)', boxSizing: 'border-box',
+      width: '100vw', height: '100vh', overflow: 'hidden', boxSizing: 'border-box',
+      background: 'var(--surface-0, #0e0f11)', padding: 14,
+      display: 'flex', gap: 14, color: 'var(--text-primary)',
     }}>
-      {/* ── Header ── */}
-      <div style={{
-        height: '52px', flexShrink: 0,
-        background: 'var(--surface-2)', borderRadius: '10px',
-        border: '0.5px solid var(--border)',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '0 18px',
+      {/* ══════════════ LEFT: AI LAB PANEL ══════════════ */}
+      <aside style={{
+        width: 320, flexShrink: 0, borderRadius: 14,
+        background: 'linear-gradient(160deg, #16181d 0%, #101216 60%, #0c0d10 100%)',
+        border: '1px solid #23262d', boxShadow: 'inset 0 1px 0 #ffffff08',
+        fontFamily: MONO, display: 'flex', flexDirection: 'column',
+        padding: '16px 16px 14px', overflow: 'hidden',
       }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: '10px' }}>
-          <span style={{ fontSize: '18px', fontWeight: 600, letterSpacing: '-0.02em' }}>TradeMeter</span>
-          <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Live ML · 11 models learning in real time</span>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 4 }}>
+          <span style={{
+            width: 9, height: 9, borderRadius: '50%', background: C_CPU,
+            boxShadow: `0 0 8px ${C_CPU}`, animation: 'lab-pulse 1.8s ease-in-out infinite',
+          }} />
+          <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '0.14em' }}>🤖 AI&nbsp;LAB</span>
         </div>
-        <div style={{ display: 'flex', gap: '24px', alignItems: 'center' }}>
-          <Stat label="MES" value={price ? price.toFixed(2) : '—'} />
-          <Stat label="Combined P&L" value={`${stats.totalPnl > 0 ? '+' : ''}${stats.totalPnl.toFixed(1)}`}
-                color={stats.totalPnl > 0 ? 'var(--text-success)' : stats.totalPnl < 0 ? 'var(--text-danger)' : undefined} />
-          <Stat label="Bars today" value={stats.maxBars.toLocaleString()} />
-          <Stat label="Win rate" value={`${stats.winRate}%`} />
-          <Stat label="Trades" value={`${stats.totalWins + stats.totalLosses}`} />
-          {lstmStatus && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: '140px' }}>
-              {lstmStatus.is_trained ? (
-                // State 3: Active
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: 'var(--text-success)' }}>
-                  <span>🧬 LSTM Active</span>
-                  {lstmStatus.train_accuracy != null && (
-                    <span style={{ color: 'var(--text-muted)' }}>{Math.round(lstmStatus.train_accuracy * 100)}% acc</span>
-                  )}
-                </div>
-              ) : lstmStatus.is_dormant ? (
-                // State 1: Collecting
-                <>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: 'var(--text-muted)' }}>
-                    <span>🧬 LSTM collecting</span>
-                    <span>{lstmStatus.bars_available?.toLocaleString()} / {lstmStatus.bars_needed?.toLocaleString()}</span>
-                  </div>
-                  <div style={{ height: '5px', background: 'var(--surface-1)', borderRadius: '3px', overflow: 'hidden' }}>
-                    <div style={{
-                      height: '5px', borderRadius: '3px',
-                      width: `${lstmStatus.progress_pct ?? 0}%`,
-                      background: '#534AB7',
-                      transition: 'width 0.5s ease',
-                    }}/>
-                  </div>
-                </>
-              ) : (
-                // State 2: Ready to train
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#534AB7' }}>
-                  <span>🧬 LSTM ready to train</span>
-                  <span style={{ color: 'var(--text-muted)' }}>{lstmStatus.bars_available?.toLocaleString()} bars</span>
-                </div>
-              )}
-            </div>
-          )}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px',
-            color: ntConnected ? 'var(--text-success)' : 'var(--text-muted)' }}>
-            <span style={{
-              width: '8px', height: '8px', borderRadius: '50%',
-              background: ntConnected ? 'var(--text-success)' : 'var(--text-muted)',
-              animation: ntConnected ? 'afk-pulse 2s infinite' : 'none'
-            }}/>
-            {ntConnected ? 'Live' : 'Waiting'}
-          </div>
-        </div>
-      </div>
-
-      {/* ── Body: left grid + right column ── */}
-      <div style={{ flex: 1, display: 'flex', gap: '10px', minHeight: 0 }}>
-
-        {/* Left: model grid (hero) */}
-        <div style={{ flex: 1.7, display: 'flex', flexDirection: 'column', gap: '6px', minHeight: 0 }}>
-          <div style={{ fontSize: '11px', color: 'var(--text-muted)', paddingLeft: '2px' }}>
-            11 models · live signals &amp; session P&L
-          </div>
-          <div style={{
-            flex: 1, display: 'grid',
-            gridTemplateColumns: 'repeat(5, 1fr)',
-            gridTemplateRows: 'repeat(2, 1fr)',
-            gap: '8px', minHeight: 0,
-          }}>
-            {MODEL_NAMES.map(name => (
-              <AfkModelCell
-                key={name}
-                name={name}
-                meta={MODEL_META[name]}
-                signal={modelSignals[name] || {}}
-                level={modelLevels[name] || {}}
-                pnl={modelPnl[name] || {}}
-                lstmStatus={name === 'lstm' ? lstmStatus : null}
-              />
-            ))}
-          </div>
+        <div style={{ fontSize: 9.5, color: 'var(--text-muted)', letterSpacing: '0.1em', marginBottom: 14 }}>
+          AUTONOMOUS&nbsp;ML&nbsp;CONTROL
         </div>
 
-        {/* Right: race + architecture */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '10px', minHeight: 0 }}>
-          <div style={{
-            background: 'var(--surface-2)', border: '0.5px solid var(--border)',
-            borderRadius: '10px', padding: '12px', overflow: 'hidden', flexShrink: 0,
-          }}>
-            <LeaderboardRace compact />
-          </div>
-          <div style={{
-            flex: 1, background: 'var(--surface-2)', border: '0.5px solid var(--border)',
-            borderRadius: '10px', padding: '12px', overflow: 'hidden',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}>
-            <ArchitectureDiagram compact />
-          </div>
+        {/* Section 1 — System */}
+        <SectionTitle>SYSTEM</SectionTitle>
+        <KVRow icon="🔨" label="Task" value={task} accent={training ? C_GPU : undefined} />
+        <BarRow icon="💻" label="CPU"  value={`${(sys.cpu_percent ?? 0).toFixed(0)}%`} pct={(sys.cpu_percent ?? 0) / 100} color={C_CPU} />
+        <BarRow icon="🧠" label="RAM"
+                value={`${(sys.ram_used_gb ?? 0).toFixed(1)}/${(sys.ram_total_gb ?? 0).toFixed(1)}G`}
+                pct={(sys.ram_percent ?? 0) / 100} color={C_RAM} />
+        <BarRow icon="🎮" label="GPU" value={`${gpu.toFixed(0)}%`} pct={gpu / 100} color={C_GPU} sub="sim" />
+
+        <Divider />
+
+        {/* Section 2 — Models */}
+        <SectionTitle>MODELS</SectionTitle>
+        <KVRow icon="📊" label="Models"      value={num(stats.activeCount)} />
+        <KVRow icon="🏆" label="Leader"
+               value={stats.leader ? MODEL_META[stats.leader].label : '—'}
+               accent={stats.leader ? MODEL_META[stats.leader].color : undefined} />
+        <KVRow icon="📈" label="Accuracy"    value={pct(stats.bestAcc)} />
+        <KVRow icon="📉" label="Win Rate"    value={pct(stats.overallWinRate)} />
+        <KVRow icon="⚡" label="Predictions" value={num(stats.predictions)} />
+        <KVRow icon="🧠" label="Samples"     value={num(stats.samples)} />
+
+        <Divider />
+
+        {/* Section 3 — Status */}
+        <SectionTitle>STATUS</SectionTitle>
+        <KVRow icon="📡" label="Market"
+               badge={{ text: market.text, color: market.color, bg: market.bg }} />
+        <KVRow icon={<span style={{ color: aiStatus.color }}>●</span>} label="AI Status"
+               value={aiStatus.label} accent={aiStatus.color} />
+        <KVRow icon="🔥" label="Last Signal"
+               badge={lastSignal ? {
+                 text: `${lastSignal.signal} ${Math.round((lastSignal.confidence ?? 0) * 100)}%`,
+                 color: lastSignal.signal === 'BUY' ? C_CPU : '#E24B4A',
+                 bg: lastSignal.signal === 'BUY' ? '#1D9E7522' : '#E24B4A22',
+               } : { text: '—', color: 'var(--text-muted)', bg: '#ffffff08' }} />
+
+        <div style={{ flex: 1 }} />
+        <div style={{ fontSize: 9, color: 'var(--text-muted)', letterSpacing: '0.08em', textAlign: 'center' }}>
+          streaming · no interaction
         </div>
-      </div>
+      </aside>
+
+      {/* ══════════════ RIGHT: ARCHITECTURE ══════════════ */}
+      <main style={{
+        flex: 1, minWidth: 0, borderRadius: 14, overflow: 'hidden',
+        background: 'linear-gradient(160deg, #15171b 0%, #101216 100%)',
+        border: '1px solid #23262d', boxShadow: 'inset 0 1px 0 #ffffff08',
+        display: 'flex', flexDirection: 'column',
+      }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '12px 18px', borderBottom: '1px solid #1e2127', flexShrink: 0,
+          fontFamily: MONO,
+        }}>
+          <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: '0.04em' }}>System Architecture</span>
+          <span style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: '0.08em' }}>
+            LIVE DATA FLOW · LEARNING LOOP
+          </span>
+        </div>
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 14 }}>
+          <ArchitectureDiagram compact />
+        </div>
+      </main>
 
       <style>{`
-        @keyframes afk-pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-        @keyframes afk-flash { 0%{background:var(--surface-2)} 50%{background:var(--surface-1)} 100%{background:var(--surface-2)} }
-        @keyframes afk-collect { 0%,100%{opacity:0.7} 50%{opacity:1} }
-        .lstm-collecting { animation: afk-collect 2s ease-in-out infinite; }
+        @keyframes lab-pulse { 0%,100%{opacity:1; transform:scale(1)} 50%{opacity:.45; transform:scale(.85)} }
       `}</style>
     </div>
   )
 }
 
-function Stat({ label, value, color }) {
+// ── Panel primitives ─────────────────────────────────────────────────────
+
+function SectionTitle({ children }) {
   return (
-    <div style={{ textAlign: 'center' }}>
-      <div style={{ fontSize: '15px', fontWeight: 600, color: color || 'var(--text-primary)', fontVariantNumeric: 'tabular-nums' }}>
-        {value}
-      </div>
-      <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>{label}</div>
+    <div style={{
+      fontSize: 9.5, fontWeight: 700, letterSpacing: '0.18em',
+      color: 'var(--text-muted)', marginBottom: 8,
+    }}>{children}</div>
+  )
+}
+
+function Divider() {
+  return <div style={{ height: 1, background: '#ffffff0d', margin: '13px 0' }} />
+}
+
+const ROW = {
+  display: 'flex', alignItems: 'center', gap: 8, marginBottom: 9,
+  fontSize: 12, lineHeight: 1.2,
+}
+const LABEL = { color: 'var(--text-secondary)', flex: 1, whiteSpace: 'nowrap' }
+const VALUE = {
+  fontWeight: 600, fontVariantNumeric: 'tabular-nums',
+  whiteSpace: 'nowrap', textAlign: 'right',
+}
+
+function KVRow({ icon, label, value, accent, badge }) {
+  return (
+    <div style={ROW}>
+      <span style={{ width: 16, textAlign: 'center', flexShrink: 0 }}>{icon}</span>
+      <span style={LABEL}>{label}</span>
+      {badge ? (
+        <span style={{
+          fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 5,
+          color: badge.color, background: badge.bg, letterSpacing: '0.04em',
+          fontVariantNumeric: 'tabular-nums',
+        }}>{badge.text}</span>
+      ) : (
+        <span style={{ ...VALUE, color: accent || 'var(--text-primary)' }}>{value}</span>
+      )}
     </div>
   )
 }
 
-function AfkModelCell({ name, meta, signal, level, pnl, lstmStatus }) {
-  const isLSTM = name === 'lstm'
-  const lstmState = isLSTM && lstmStatus
-    ? (lstmStatus.is_trained ? 'active' : lstmStatus.is_dormant ? 'collecting' : 'ready')
-    : null
-
-  const sig = signal.signal || '—'
-  const conf = signal.confidence ? Math.round(signal.confidence * 100) : null
-  const pnlPoints = pnl.points ?? 0
-  const pnlColor = pnlPoints > 0 ? 'var(--text-success)' : pnlPoints < 0 ? 'var(--text-danger)' : 'var(--text-muted)'
-  const lvl = level.level ?? 1
-  const rank = level.rank ?? 'Rookie'
-  const xpPct = level.xp_progress_pct ?? 0
-  const streak = level.streak ?? 0
-
-  const sigColor = sig === 'BUY' ? 'var(--text-success)' : sig === 'SELL' ? 'var(--text-danger)' : 'var(--text-muted)'
-  const sigBg = sig === 'BUY' ? 'var(--bg-success)' : sig === 'SELL' ? 'var(--bg-danger)' : 'var(--surface-1)'
-
+function BarRow({ icon, label, value, pct, color, sub }) {
+  const width = `${Math.min(100, Math.max(0, (pct ?? 0) * 100))}%`
   return (
-    <div style={{
-      background: 'var(--surface-2)', border: '0.5px solid var(--border)',
-      borderRadius: '10px', padding: '10px',
-      display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
-      minHeight: 0,
-    }}>
-      {/* Top: avatar + name */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
-        <div style={{
-          width: '26px', height: '26px', borderRadius: '7px', flexShrink: 0,
-          background: meta.color + '22', color: meta.color,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: '10px', fontWeight: 600,
-        }}>{meta.abbr}</div>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: '12px', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {meta.label}
-          </div>
-          <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>
-            {lstmState === 'collecting' ? 'Neural net · warming up'
-             : lstmState === 'ready' ? 'Neural net · ready to train'
-             : `${rank} · Lv ${lvl}`}
-          </div>
-        </div>
+    <div style={{ marginBottom: 9 }}>
+      <div style={{ ...ROW, marginBottom: 4 }}>
+        <span style={{ width: 16, textAlign: 'center', flexShrink: 0 }}>{icon}</span>
+        <span style={LABEL}>
+          {label}
+          {sub && <span style={{ color: 'var(--text-muted)', fontSize: 9, marginLeft: 5 }}>({sub})</span>}
+        </span>
+        <span style={{ ...VALUE, color }}>{value}</span>
       </div>
-
-      {lstmState === 'collecting' ? (
-        /* State 1: Collecting — show collection progress instead of signal/P&L */
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '6px' }}>
-          <div className="lstm-collecting" style={{ fontSize: '11px', color: '#534AB7', fontWeight: 500 }}>
-            🧬 Collecting data
-          </div>
-          <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums' }}>
-            {lstmStatus.bars_available?.toLocaleString()}
-            <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 400 }}>
-              {' '}/ {lstmStatus.bars_needed?.toLocaleString()}
-            </span>
-          </div>
-          <div style={{ height: '5px', background: 'var(--surface-1)', borderRadius: '3px', overflow: 'hidden' }}>
-            <div style={{
-              height: '5px', borderRadius: '3px',
-              width: `${lstmStatus.progress_pct ?? 0}%`,
-              background: '#534AB7',
-              transition: 'width 0.5s ease',
-            }}/>
-          </div>
-          <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>
-            {(lstmStatus.bars_needed - lstmStatus.bars_available)?.toLocaleString()} bars until activation
-          </div>
-        </div>
-      ) : lstmState === 'ready' ? (
-        /* State 2: Ready to train — enough data collected, awaiting training */
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '6px' }}>
-          <div className="lstm-collecting" style={{ fontSize: '11px', color: '#534AB7', fontWeight: 500 }}>
-            🧬 Ready to train
-          </div>
-          <div style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-primary)' }}>
-            {lstmStatus.bars_available?.toLocaleString()}
-            <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 400 }}> bars ready</span>
-          </div>
-          <div style={{ height: '5px', background: 'var(--surface-1)', borderRadius: '3px', overflow: 'hidden' }}>
-            <div style={{ height: '5px', borderRadius: '3px', width: '100%', background: '#534AB7' }}/>
-          </div>
-          <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>Training on next nightly cycle</div>
-        </div>
-      ) : (
-        <>
-          {/* Signal */}
-          <div style={{
-            display: 'inline-block', alignSelf: 'flex-start',
-            fontSize: '11px', fontWeight: 600, padding: '2px 8px',
-            borderRadius: '6px', background: sigBg, color: sigColor, marginBottom: '6px',
-          }}>
-            {sig === 'BUY' ? '▲' : sig === 'SELL' ? '▼' : '—'} {sig}{conf !== null ? ` ${conf}%` : ''}
-          </div>
-
-          {/* P&L — big */}
-          <div style={{
-            fontSize: '20px', fontWeight: 700, color: pnlColor,
-            fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em',
-          }}>
-            {pnlPoints > 0 ? '+' : ''}{pnlPoints.toFixed(1)}
-          </div>
-          <div style={{ fontSize: '9px', color: 'var(--text-muted)', marginBottom: '6px' }}>
-            session pts · {pnl.wins ?? 0}W {pnl.losses ?? 0}L
-          </div>
-
-          {/* XP bar */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-            <div style={{ flex: 1, height: '3px', background: 'var(--surface-1)', borderRadius: '2px', overflow: 'hidden' }}>
-              <div style={{
-                height: '3px', borderRadius: '2px',
-                width: `${Math.round(xpPct * 100)}%`, background: meta.color,
-                transition: 'width 0.5s ease',
-              }}/>
-            </div>
-            {streak >= 3 && <span style={{ fontSize: '9px', color: 'var(--text-success)' }}>🔥{streak}</span>}
-          </div>
-        </>
-      )}
+      <div style={{ height: 5, borderRadius: 3, background: '#ffffff0d', overflow: 'hidden', marginLeft: 24 }}>
+        <div style={{
+          height: '100%', width, background: color, borderRadius: 3,
+          boxShadow: `0 0 6px ${color}66`, transition: 'width 0.6s ease',
+        }} />
+      </div>
     </div>
   )
 }

@@ -99,7 +99,6 @@ export function useWebSocket(enabled = true) {
       ws.current.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data)
-          console.log('[WS] message:', msg.type, `(${Object.keys(msg).length})`, Object.keys(msg))
 
           if (msg.type === 'tick') {
             // Real-time price update (inter-bar tick or warmup bar close).

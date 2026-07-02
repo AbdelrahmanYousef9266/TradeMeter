@@ -10,7 +10,7 @@ const MODEL_META = {
   aggressive:     { label: 'Aggressive',      style: 'High risk'        },
   volume:         { label: 'Volume',          style: 'Order flow'       },
   contrarian:     { label: 'Contrarian',      style: 'Bets against crowd'},
-  personal:       { label: 'You',             style: 'Hybrid · Model 9' },
+  personal:       { label: 'Secret',          style: 'Hybrid · Model 9' },
   lstm:           { label: 'Deep LSTM',       style: 'Sequence patterns · Model 11' },
 }
 

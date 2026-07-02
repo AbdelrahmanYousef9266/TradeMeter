@@ -10,7 +10,7 @@ const MODEL_LABELS = {
   aggressive:     'Aggressive',
   volume:         'Volume',
   contrarian:     'Contrarian',
-  personal:       'You',
+  personal:       'Secret',
 }
 
 const RANK_COLORS = {

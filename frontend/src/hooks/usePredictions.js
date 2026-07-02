@@ -8,7 +8,6 @@ export function usePredictions() {
   useEffect(() => {
     getModels()
       .then(res => {
-        console.log('[Predictions] loaded', res.data?.length, 'models')
         res.data?.forEach(model => {
           if (model.level_info) {
             updateModelLevel(model.name, model.level_info)

@@ -160,23 +160,32 @@ class MLPipeline:
             # 1. Fill signals buffered on the PREVIOUS bar at THIS bar's real open.
             self._fill_pending_trades(current_bar_open, bar_time)
             # 2. Buffer THIS bar's signals — they fill at the NEXT bar's open.
-            self._buffer_pending_trades(predictions, features)
+            self._buffer_pending_trades(predictions, features, bar_time)
 
         return predictions
 
     # ── Trade-entry buffering (deferred fill — avoids look-ahead) ───────────
 
     def _fill_pending_trades(self, bar_open: float, bar_time: object) -> None:
-        """Open all buffered signals at *bar_open* (the actual next-bar open)."""
+        """
+        Open all buffered signals at *bar_open* (the actual next-bar open, so the
+        fill price is look-ahead-free).  The trade's entry_time is set to the
+        SIGNAL bar's time (buffered as `signal_time`), not this fill bar, so
+        _save_trade attributes the realized P&L to the prediction row that
+        actually produced the signal — one bar earlier — rather than to this
+        bar's (unrelated) prediction.
+        """
         for spec in self._pending_champion:
-            self.trade_manager.open_trade(next_bar_open=bar_open, bar_time=bar_time, **spec)
+            signal_time = spec.pop("signal_time", bar_time)
+            self.trade_manager.open_trade(next_bar_open=bar_open, bar_time=signal_time, **spec)
         self._pending_champion = []
 
         for spec in self._pending_challenger:
-            self.challenger_trade_manager.open_trade(next_bar_open=bar_open, bar_time=bar_time, **spec)
+            signal_time = spec.pop("signal_time", bar_time)
+            self.challenger_trade_manager.open_trade(next_bar_open=bar_open, bar_time=signal_time, **spec)
         self._pending_challenger = []
 
-    def _buffer_pending_trades(self, predictions: dict, features: dict) -> None:
+    def _buffer_pending_trades(self, predictions: dict, features: dict, signal_time: object) -> None:
         """Record this bar's non-HOLD signals for filling at the next bar's open."""
         atr = features.get("atr_14", 1.0)
 
@@ -194,6 +203,7 @@ class MLPipeline:
                 "atr_target_mult": params.get("atr_target_mult", 3.0),
                 "confidence":      pred.confidence,
                 "features":        features,
+                "signal_time":     signal_time,
             })
 
         # Challenger book: the 8 CC models' own (silent) signals.
@@ -210,6 +220,7 @@ class MLPipeline:
                 "atr_target_mult": params.get("atr_target_mult", 3.0),
                 "confidence":      cpred.confidence,
                 "features":        features,
+                "signal_time":     signal_time,
             })
 
     # ── Learning ──────────────────────────────────────────────────────────

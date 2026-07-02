@@ -26,13 +26,18 @@ const useStore = create((set) => ({
   // Live bar data
   currentBar: null,
   barHistory: [],
+  // Epoch ms of the last bar/tick received over the WebSocket. Lets pages tell
+  // whether market data is actively streaming (live OR replay) vs. idle,
+  // independent of the real-world clock.
+  lastBarAt: 0,
   // setBar: appends a new candle to history — use for bar closes only
   setBar: (bar) => set(state => ({
     currentBar: bar,
     barHistory: [...state.barHistory.slice(-199), bar],
+    lastBarAt: Date.now(),
   })),
   // setCurrentBar: updates live price display only — use for ticks and warmup bars
-  setCurrentBar: (bar) => set({ currentBar: bar }),
+  setCurrentBar: (bar) => set({ currentBar: bar, lastBarAt: Date.now() }),
   // setBarHistory: bulk-replace history (used to hydrate the chart on page load)
   setBarHistory: (bars) => set({ barHistory: bars, currentBar: bars[bars.length - 1] ?? null }),
 

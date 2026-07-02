@@ -33,7 +33,7 @@ import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
 
 from app.models.tick import Tick
-from app.services.market_data.features import get_engine
+from app.services.market_data.features import get_engine, get_et_time
 from app.services.ml.pipeline import get_pipeline
 from app.core.redis import cache_latest_predictions
 
@@ -47,10 +47,52 @@ _CONSUMER_NAME = "worker-1"      # stable name so a restart reclaims its pending
 # {user_id: {"features": dict, "predictions": dict, "close": float}}
 _bar_state: dict[str, dict] = {}
 
-# Per-user high-water mark of the last processed bar close time.
-# Seeded from the ticks table on first access so it survives restarts.
-# {user_id: datetime | None}
+# Per-user high-water mark of the last processed LIVE bar close time.
+# Seeded from the ticks table (live rows only) on first access so it survives
+# restarts. {user_id: datetime | None}
 _last_bar_time: dict[str, object] = {}
+
+
+# ── Training mode (per-user) ─────────────────────────────────────────────────
+#
+# When a user turns training mode ON, they replay historical sessions through
+# the same NinjaTrader playback feed. The backend then:
+#   • bypasses the monotonic watermark so past/out-of-order bars are accepted,
+#   • never advances the live watermark (so live forward data resumes cleanly),
+#   • tags every stored tick/prediction is_training = true so it stays out of the
+#     live dataset and live-view queries.
+# In-memory, per-user, mirroring the other registries above.
+_training_mode:      dict[str, bool] = {}
+_training_bar_count: dict[str, int]  = {}
+_training_sessions:  dict[str, set]  = {}
+
+
+def is_training_mode(user_id: str) -> bool:
+    return _training_mode.get(user_id, False)
+
+
+def start_training(user_id: str) -> dict:
+    """Turn training mode ON and reset this-run counters."""
+    _training_mode[user_id]      = True
+    _training_bar_count[user_id] = 0
+    _training_sessions[user_id]  = set()
+    logger.info("Training mode ON for user %s", user_id)
+    return training_status(user_id)
+
+
+def stop_training(user_id: str) -> dict:
+    """Turn training mode OFF. Counters from the run are retained for the status read."""
+    _training_mode[user_id] = False
+    logger.info("Training mode OFF for user %s", user_id)
+    return training_status(user_id)
+
+
+def training_status(user_id: str) -> dict:
+    return {
+        "training":          _training_mode.get(user_id, False),
+        "bars_ingested":     _training_bar_count.get(user_id, 0),
+        "sessions_ingested": len(_training_sessions.get(user_id, ())),
+    }
 
 
 # ── Idempotency / monotonic-order guard ──────────────────────────────────────
@@ -73,7 +115,7 @@ async def _accept_bar(user_id: str, tick_time, db_pool: asyncpg.Pool) -> bool:
         try:
             async with db_pool.acquire() as conn:
                 watermark = await conn.fetchval(
-                    "SELECT MAX(time) FROM ticks WHERE user_id = $1",
+                    "SELECT MAX(time) FROM ticks WHERE user_id = $1 AND is_training = false",
                     _uuid.UUID(user_id),
                 )
         except Exception as exc:
@@ -90,13 +132,15 @@ async def _accept_bar(user_id: str, tick_time, db_pool: asyncpg.Pool) -> bool:
 
 # ── DB write helpers ────────────────────────────────────────────────────────
 
-async def write_tick_to_db(conn: asyncpg.Connection, tick: Tick) -> None:
+async def write_tick_to_db(
+    conn: asyncpg.Connection, tick: Tick, is_training: bool = False
+) -> None:
     await conn.execute(
-        """INSERT INTO ticks (time, user_id, symbol, open, high, low, close, volume, bar_type)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
+        """INSERT INTO ticks (time, user_id, symbol, open, high, low, close, volume, bar_type, is_training)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
         tick.time, tick.user_id, tick.symbol,
         tick.open, tick.high, tick.low, tick.close,
-        tick.volume, tick.bar_type,
+        tick.volume, tick.bar_type, is_training,
     )
 
 
@@ -104,6 +148,7 @@ async def _store_predictions(
     conn: asyncpg.Connection,
     tick: Tick,
     predictions: dict,
+    is_training: bool = False,
 ) -> None:
     from app.services.ml.models.base import ModelPrediction
     uid = tick.user_id
@@ -114,12 +159,12 @@ async def _store_predictions(
             await conn.execute(
                 """INSERT INTO predictions
                        (time, user_id, model_name, signal, confidence,
-                        predicted_high, predicted_low, direction_up_prob)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
+                        predicted_high, predicted_low, direction_up_prob, is_training)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
                 tick.time, uid, model_name,
                 pred.signal, pred.confidence,
                 pred.predicted_high, pred.predicted_low,
-                pred.direction_up,
+                pred.direction_up, is_training,
             )
         except Exception as exc:
             logger.error("Failed to store prediction for %s: %s", model_name, exc)
@@ -162,16 +207,29 @@ async def _process_entry(
     # ────────────────────────────────────────────────────────────────────────
 
     user_id = str(tick.user_id)
+    training = is_training_mode(user_id)
 
     # ── 2b. IDEMPOTENCY GATE — skip duplicate / out-of-order bars ─────────
     # Must run before any stateful work (feature engine, DB writes, learning)
     # so a redelivered bar can't double-mutate state or insert duplicate rows.
-    if not await _accept_bar(user_id, tick.time, db_pool):
-        logger.debug(
-            "Ingestion: skipping duplicate/stale bar %s for user %s",
-            tick.time, user_id,
-        )
-        return
+    #
+    # TRAINING MODE bypasses this entirely: replaying history means bars are
+    # deliberately in the past / out of order. We also never call _accept_bar
+    # here (it advances the live watermark) so live forward data resumes cleanly
+    # once training stops.
+    if not training:
+        if not await _accept_bar(user_id, tick.time, db_pool):
+            logger.debug(
+                "Ingestion: skipping duplicate/stale bar %s for user %s",
+                tick.time, user_id,
+            )
+            return
+    else:
+        _training_bar_count[user_id] = _training_bar_count.get(user_id, 0) + 1
+        try:
+            _training_sessions.setdefault(user_id, set()).add(get_et_time(tick.time).date())
+        except Exception:
+            pass
 
     # Compact bar dict reused in all outgoing payloads
     _bar = {
@@ -185,7 +243,7 @@ async def _process_entry(
     # ── 3. Write bar close to DB ──────────────────────────────────────────
     try:
         async with db_pool.acquire() as conn:
-            await write_tick_to_db(conn, tick)
+            await write_tick_to_db(conn, tick, is_training=training)
     except asyncpg.PostgresError as exc:
         # Non-fatal — ML pipeline and WebSocket publish still run
         logger.error("Ingestion: DB write failed (continuing to ML): %s", exc)
@@ -208,6 +266,7 @@ async def _process_entry(
                 "type": "tick",
                 "time": tick.time.isoformat(),
                 "bar":  _bar,
+                "training": training,
                 "warmup": {
                     "bars_received": engine.bar_count,
                     "bars_needed":   50,
@@ -301,6 +360,7 @@ async def _process_entry(
             "levels":      levels_dict,
             "warmup":      None,   # signals to frontend: past warmup, predictions are live
             "session_pnl": pnl_detail,
+            "training":    training,   # historical replay vs live forward data
         }))
 
         # 9. Cache latest predictions in Redis
@@ -309,7 +369,7 @@ async def _process_entry(
         # 10. Store predictions in DB (non-fatal)
         try:
             async with db_pool.acquire() as conn:
-                await _store_predictions(conn, tick, predictions)
+                await _store_predictions(conn, tick, predictions, is_training=training)
         except Exception as exc:
             logger.error("Ingestion: _store_predictions failed for user %s: %s", user_id, exc)
 

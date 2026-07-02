@@ -47,13 +47,19 @@ export default function ArchitectureDiagram({ compact = false }) {
                   markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 z" fill="context-stroke" />
           </marker>
+          {/* Soft blur used for the glow-pulse behind key nodes */}
+          <filter id="tm-soft" x="-40%" y="-40%" width="180%" height="180%">
+            <feGaussianBlur stdDeviation="5" />
+          </filter>
         </defs>
 
         {/* ══════════════ DATA FLOW ══════════════ */}
 
-        {/* NinjaTrader */}
+        {/* NinjaTrader (key input node — glow) */}
+        <rect className="tm-glow" x="220" y="24" width="240" height="52" rx="11"
+              fill="none" stroke="#5271ff" strokeWidth="3" filter="url(#tm-soft)" />
         <rect x="220" y="24" width="240" height="52" rx="11"
-              fill="var(--surface-2)" stroke="var(--border)" strokeWidth="1" />
+              fill="var(--surface-2)" stroke="#5271ff" strokeWidth="1.5" />
         <text x="340" y="46" textAnchor="middle" fontSize="13" fontWeight="600" fill="var(--text-primary)">NinjaTrader 8</text>
         <text x="340" y="63" textAnchor="middle" fontSize="10" fill="var(--text-muted)">Live 1-min bars</text>
 
@@ -65,7 +71,7 @@ export default function ArchitectureDiagram({ compact = false }) {
 
         {/* Redis */}
         <rect x="220" y="112" width="240" height="52" rx="11"
-              fill="var(--surface-2)" stroke="var(--border)" strokeWidth="1" />
+              fill="var(--surface-2)" stroke="#5271ff" strokeWidth="1.5" />
         <text x="340" y="134" textAnchor="middle" fontSize="13" fontWeight="600" fill="var(--text-primary)">Redis Streams</text>
         <text x="340" y="151" textAnchor="middle" fontSize="10" fill="var(--text-muted)">Token auth · crash-safe buffer</text>
 
@@ -75,13 +81,13 @@ export default function ArchitectureDiagram({ compact = false }) {
 
         {/* TimescaleDB */}
         <rect x="70" y="200" width="250" height="56" rx="11"
-              fill="var(--surface-2)" stroke="var(--border)" strokeWidth="1" />
+              fill="var(--surface-2)" stroke="#5271ff" strokeWidth="1.5" />
         <text x="195" y="224" textAnchor="middle" fontSize="13" fontWeight="600" fill="var(--text-primary)">TimescaleDB</text>
         <text x="195" y="241" textAnchor="middle" fontSize="10" fill="var(--text-muted)">Stores every bar</text>
 
         {/* Feature Engine */}
         <rect x="360" y="200" width="250" height="56" rx="11"
-              fill="var(--surface-2)" stroke="var(--border)" strokeWidth="1" />
+              fill="var(--surface-2)" stroke="#7F77DD" strokeWidth="1.5" />
         <text x="485" y="224" textAnchor="middle" fontSize="13" fontWeight="600" fill="var(--text-primary)">Feature Engine</text>
         <text x="485" y="241" textAnchor="middle" fontSize="10" fill="var(--text-muted)">16 features per bar</text>
 
@@ -89,11 +95,13 @@ export default function ArchitectureDiagram({ compact = false }) {
         <line x1="195" y1="256" x2="330" y2="290" className="tm-flow" stroke="#5271ff" strokeWidth="2" markerEnd="url(#tm-arrow)" />
         <line x1="485" y1="256" x2="350" y2="290" className="tm-flow" stroke="#7F77DD" strokeWidth="2" markerEnd="url(#tm-arrow)" />
 
-        {/* 11 ML models */}
+        {/* 11 ML models (key compute node — glow) */}
+        <rect className="tm-glow" x="60" y="292" width="560" height="104" rx="12"
+              fill="none" stroke="#7F77DD" strokeWidth="3" filter="url(#tm-soft)" />
         <rect x="60" y="292" width="560" height="104" rx="12"
-              fill="var(--surface-2)" stroke="var(--border)" strokeWidth="1" />
+              fill="var(--surface-2)" stroke="#7F77DD" strokeWidth="1.5" />
         <text x="340" y="312" textAnchor="middle" fontSize="13" fontWeight="600" fill="var(--text-primary)">11 ML Models — predict in parallel</text>
-        <text x="340" y="327" textAnchor="middle" fontSize="10" fill="var(--text-muted)">8 River online-learners · You · Brother · Deep LSTM</text>
+        <text x="340" y="327" textAnchor="middle" fontSize="10" fill="var(--text-muted)">8 River online-learners · Secret · Fantastic · Deep LSTM</text>
 
         {/* Row 1 chips */}
         <ModelChip x={86}  label="Scalper" />
@@ -105,8 +113,8 @@ export default function ArchitectureDiagram({ compact = false }) {
         {/* Row 2 chips */}
         <ModelChip x={129} y={364} label="Volume" />
         <ModelChip x={215} y={364} label="Contrar." />
-        <ModelChip x={301} y={364} label="You" />
-        <ModelChip x={387} y={364} label="Brother" />
+        <ModelChip x={301} y={364} label="Secret" />
+        <ModelChip x={387} y={364} label="Fantastic" />
         <ModelChip x={473} y={364} label="LSTM" />
 
         {/* Models → Loop */}
@@ -158,9 +166,11 @@ export default function ArchitectureDiagram({ compact = false }) {
         <line x1="340" y1="600" x2="340" y2="628" className="tm-flow" stroke="#5271ff" strokeWidth="2" markerEnd="url(#tm-arrow)" />
         <circle className="tm-bar" cx="340" cy="602" r="3" fill="#5271ff" style={{ ['--tm-dist']: '24px' }} />
 
-        {/* Dashboard */}
+        {/* Dashboard (key output node — glow) */}
+        <rect className="tm-glow" x="200" y="628" width="280" height="54" rx="11"
+              fill="none" stroke="#2dd4bf" strokeWidth="3" filter="url(#tm-soft)" />
         <rect x="200" y="628" width="280" height="54" rx="11"
-              fill="var(--surface-2)" stroke="var(--border)" strokeWidth="1" />
+              fill="var(--surface-2)" stroke="#2dd4bf" strokeWidth="1.5" />
         <text x="340" y="651" textAnchor="middle" fontSize="13" fontWeight="600" fill="var(--text-primary)">Dashboard</text>
         <text x="340" y="668" textAnchor="middle" fontSize="10" fill="var(--text-muted)">WebSocket · signals · P&amp;L · levels</text>
       </svg>

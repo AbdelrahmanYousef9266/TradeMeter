@@ -71,6 +71,39 @@ async def test_trade_fills_at_next_bar_open(monkeypatch):
         f"entry {trades[0].entry_price} should be next bar open {bar2_open}, not {bar1_open}"
 
 
+# ── Deferred fill attributes P&L to the SIGNAL bar, not the fill bar ─────────
+
+@pytest.mark.asyncio
+async def test_deferred_trade_entry_time_is_signal_bar(monkeypatch):
+    """
+    The trade fills at the next bar's OPEN PRICE (look-ahead-free) but its
+    entry_time must be the SIGNAL bar's timestamp, so _save_trade attributes the
+    realized outcome to the prediction row that actually produced the signal
+    (one bar earlier) rather than the fill bar's unrelated prediction.
+    """
+    from app.core.config import settings as cfg
+    monkeypatch.setattr(cfg, "model_snapshot_interval", 10**9)
+    monkeypatch.setattr(cfg, "model_state_save_interval", 10**9)
+
+    pipe = MLPipeline("cccccccc-cccc-cccc-cccc-cccccccccccc", {})
+    buy = ModelPrediction("BUY", 0.9, 0.9, 0.1, 5900.0, 5800.0)
+    monkeypatch.setattr(
+        pipe.cc_models["momentum"]._champion_model_obj,
+        "predict", lambda *a, **k: buy,
+    )
+
+    t_signal = _T0
+    t_fill   = _T0 + timedelta(minutes=1)
+
+    await pipe.predict_all(FEATS, 5845.0, current_bar_open=5840.0, bar_time=t_signal)
+    await pipe.predict_all(FEATS, 5865.0, current_bar_open=5860.0, bar_time=t_fill)
+
+    trade = pipe.trade_manager.open_trades["momentum"][0]
+    assert trade.entry_price == 5860.0            # fill price = next bar open
+    assert trade.entry_time == t_signal, \
+        "entry_time must be the signal bar (for correct predictions-row attribution)"
+
+
 # ── BUG 2 — both-touched bar resolves pessimistically as a stop (loss) ───────
 
 def test_intrabar_both_touched_buy_resolves_as_loss():
