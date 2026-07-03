@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import useStore from '../store'
 import ArchitectureDiagram from '../components/ArchitectureDiagram'
 import LeaderboardRace from '../components/LeaderboardRace'
+import TradeSignalPanel from '../components/dashboard/TradeSignalPanel'
 
 const MODEL_META = {
   scalper:        { label: 'Scalper',         style: 'Ultra short-term',  color: '#3B82C4' },
@@ -12,7 +13,7 @@ const MODEL_META = {
   aggressive:     { label: 'Aggressive',      style: 'High risk',         color: '#E24B4A' },
   volume:         { label: 'Volume',          style: 'Order flow',        color: '#7F77DD' },
   contrarian:     { label: 'Contrarian',      style: 'Against the crowd', color: '#D4537E' },
-  personal:       { label: 'You (Model 9)',   style: 'Hybrid ensemble',   color: '#1D9E75' },
+  personal:       { label: 'Secret',          style: 'Hybrid ensemble',   color: '#1D9E75' },
   lstm:           { label: 'Deep LSTM',       style: 'Neural sequences',  color: '#534AB7' },
 }
 
@@ -107,6 +108,11 @@ export default function StreamDashboard() {
             {ntConnected ? 'Live' : 'Waiting'}
           </div>
         </div>
+      </div>
+
+      {/* ── One clear actionable call from the leading model ── */}
+      <div style={{ marginBottom: '24px' }}>
+        <TradeSignalPanel />
       </div>
 
       {/* ── Model grid — 5 columns × 2 rows for the 10 models ── */}

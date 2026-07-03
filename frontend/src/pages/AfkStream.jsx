@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo } from 'react'
 import useStore from '../store'
 import { getSystemStats, getTrainingStatus, getLSTMStatus } from '../services/api'
 import ArchitectureDiagram from '../components/ArchitectureDiagram'
+import LeaderboardRace from '../components/LeaderboardRace'
+import TradeSignalPanel from '../components/dashboard/TradeSignalPanel'
 
 // Monospace stack for the control-panel look.
 const MONO = "ui-monospace, 'JetBrains Mono', 'SF Mono', 'Cascadia Code', Menlo, Consolas, monospace"
@@ -245,25 +247,46 @@ export default function AfkStream() {
         </div>
       </aside>
 
-      {/* ══════════════ RIGHT: ARCHITECTURE ══════════════ */}
+      {/* ══════════════ RIGHT: SIGNAL · RACE · ARCHITECTURE ══════════════ */}
       <main style={{
-        flex: 1, minWidth: 0, borderRadius: 14, overflow: 'hidden',
-        background: 'linear-gradient(160deg, #15171b 0%, #101216 100%)',
-        border: '1px solid #23262d', boxShadow: 'inset 0 1px 0 #ffffff08',
-        display: 'flex', flexDirection: 'column',
+        flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden',
+        display: 'flex', flexDirection: 'column', gap: 12,
       }}>
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '12px 18px', borderBottom: '1px solid #1e2127', flexShrink: 0,
-          fontFamily: MONO,
-        }}>
-          <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: '0.04em' }}>System Architecture</span>
-          <span style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: '0.08em' }}>
-            LIVE DATA FLOW · LEARNING LOOP
-          </span>
+        {/* Trade Signal — top (most actionable) */}
+        <div style={{ flexShrink: 0 }}>
+          <TradeSignalPanel compact />
         </div>
-        <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 14 }}>
-          <ArchitectureDiagram compact />
+
+        {/* Leaderboard race — middle */}
+        <div style={{
+          flexShrink: 0, borderRadius: 14, overflow: 'hidden', fontFamily: MONO,
+          background: 'linear-gradient(160deg, #15171b 0%, #101216 100%)',
+          border: '1px solid #23262d', boxShadow: 'inset 0 1px 0 #ffffff08',
+          padding: '12px 16px',
+        }}>
+          <LeaderboardRace compact />
+        </div>
+
+        {/* Architecture — remaining space */}
+        <div style={{
+          flex: 1, minHeight: 0, borderRadius: 14, overflow: 'hidden',
+          background: 'linear-gradient(160deg, #15171b 0%, #101216 100%)',
+          border: '1px solid #23262d', boxShadow: 'inset 0 1px 0 #ffffff08',
+          display: 'flex', flexDirection: 'column',
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '10px 16px', borderBottom: '1px solid #1e2127', flexShrink: 0,
+            fontFamily: MONO,
+          }}>
+            <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.04em' }}>System Architecture</span>
+            <span style={{ fontSize: 9.5, color: 'var(--text-muted)', letterSpacing: '0.08em' }}>
+              LIVE DATA FLOW · LEARNING LOOP
+            </span>
+          </div>
+          <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 10 }}>
+            <ArchitectureDiagram compact />
+          </div>
         </div>
       </main>
 

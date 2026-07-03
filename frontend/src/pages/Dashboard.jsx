@@ -5,6 +5,7 @@ import Leaderboard   from '../components/dashboard/Leaderboard'
 import ModelCard      from '../components/dashboard/ModelCard'
 import LSTMCard       from '../components/dashboard/LSTMCard'
 import TrainingMode   from '../components/dashboard/TrainingMode'
+import TradeSignalPanel from '../components/dashboard/TradeSignalPanel'
 import LiveChart      from '../components/chart/LiveChart'
 import useStore       from '../store'
 import { logout as apiLogout } from '../services/api'
@@ -162,6 +163,11 @@ export default function Dashboard() {
 
       {/* Training Mode control + banner */}
       <TrainingMode />
+
+      {/* One clear, actionable trade plan from the leading model */}
+      <div style={{ marginBottom: 12 }}>
+        <TradeSignalPanel />
+      </div>
 
       {/* Live chart */}
       <LiveChart bars={barHistory} style={{ marginBottom: 12 }} />
