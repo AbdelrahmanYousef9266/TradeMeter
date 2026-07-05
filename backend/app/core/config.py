@@ -36,8 +36,21 @@ class Settings(BaseSettings):
     # Frontend (for OAuth redirect after callback)
     frontend_url: str = "http://localhost:5173"
 
+    # CORS — comma-separated list of allowed browser origins. Defaults to the
+    # local dev origins; MUST be set to the real frontend origin(s) for a remote
+    # deployment or the browser blocks every credentialed request.
+    cors_origins: str = "http://localhost:5173,http://localhost:3000"
+
     # Environment
     env: str = "development"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """Parsed, de-duplicated CORS origins, always including frontend_url."""
+        origins = [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        if self.frontend_url and self.frontend_url not in origins:
+            origins.append(self.frontend_url)
+        return origins
 
     model_config = {
         "env_file": [".env", "../.env"],  # backend/.env first, then TradeMeter/.env

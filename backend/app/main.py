@@ -40,6 +40,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _supervise(task: asyncio.Task, name: str) -> None:
+    """
+    Attach a done-callback that surfaces a background task dying unexpectedly.
+
+    The TCP listener, ingestion consumer, and nightly trainer are meant to run
+    for the life of the process. If one raises an unhandled exception the task
+    silently completes and the AFK stream freezes with no error. This logs the
+    crash loudly (CRITICAL) so it is visible instead of vanishing — the internal
+    loops already retry transient errors, so reaching here means a hard failure.
+    """
+    def _done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.critical(
+                "Background task '%s' died with an unhandled exception — "
+                "the live stream may be frozen until the backend is restarted: %r",
+                name, exc,
+            )
+    task.add_done_callback(_done)
+
+
 async def nightly_lstm_training(app: FastAPI) -> None:
     """
     Retrain the LSTM (Model 11) for every active user once per day, ~2 AM ET.
@@ -118,6 +141,10 @@ async def lifespan(app: FastAPI):
 
     app.state.lstm_task = asyncio.create_task(nightly_lstm_training(app))
 
+    _supervise(app.state.tcp_task,       "tcp_listener")
+    _supervise(app.state.ingestion_task, "ingestion_consumer")
+    _supervise(app.state.lstm_task,      "nightly_lstm_training")
+
     logger.info("TradeMeter backend ready")
 
     yield
@@ -160,7 +187,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -3,26 +3,36 @@ version: '3.9'
 services:
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
+    # appendonly persistence so the stream + consumer-group PEL survive a restart
+    # rather than being lost between the default RDB snapshots.
+    command: ["redis-server", "--appendonly", "yes"]
+    # Bind to localhost only — the DB/cache must not be reachable from the LAN or
+    # internet. Reach them over the private network (e.g. Tailscale), not 0.0.0.0.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
 
   timescaledb:
     image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
     environment:
       POSTGRES_DB: trademeter
       POSTGRES_USER: trademeter
-      POSTGRES_PASSWORD: password
+      # Override in a .env / secret for any non-local deployment — never ship the
+      # default 'password' to a machine reachable beyond localhost.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
 
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.11.0
+    restart: unless-stopped
     ports:
-      - "5001:5000"
+      - "127.0.0.1:5001:5000"
     command: mlflow server --host 0.0.0.0
     volumes:
       - mlflow_data:/mlflow

@@ -30,6 +30,15 @@ logger = logging.getLogger(__name__)
 # never the plain token itself, to avoid leaking credentials into Redis.
 _TOKEN_CACHE_TTL = 3600
 
+# ── Abuse limits (the TCP port is internet-exposed for remote NinjaTrader) ──
+# A valid message is ~100 bytes. These bounds stop a hostile or buggy client
+# from exhausting memory (an endless stream with no newline) or hammering the
+# token path (a brute-force / connect-flood DoS) without any throttle.
+_MAX_LINE_BYTES       = 8192   # a single message this long is malformed → drop the connection
+_MAX_BUFFER_BYTES     = 65536  # unparsed backlog cap; exceeding it means no newline is coming
+_MAX_AUTH_FAILURES    = 10     # bad tokens tolerated before we close the connection
+_MAX_PREAUTH_MESSAGES = 50     # total lines accepted before a token must resolve
+
 
 async def _resolve_token(
     token: str,
@@ -118,6 +127,8 @@ async def handle_client(
 
     user_id: str | None = None
     buffer = ""
+    auth_failures  = 0   # bad tokens seen before a successful resolve
+    preauth_lines  = 0   # total lines processed while still unauthenticated
 
     try:
         while True:
@@ -127,12 +138,40 @@ async def handle_client(
 
             buffer += chunk.decode("utf-8", errors="replace")
 
+            # Guard against an endless stream with no newline (memory exhaustion):
+            # a legitimate message is far shorter than the buffer cap, so a backlog
+            # this large with no line terminator is abusive — drop the connection.
+            if len(buffer) > _MAX_BUFFER_BYTES:
+                logger.warning(
+                    "TCP: buffer overflow from %s (%d bytes, no newline) — closing",
+                    addr, len(buffer),
+                )
+                break
+
             # Process every complete newline-terminated message in the buffer.
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
                 line = line.strip()
                 if not line:
                     continue
+
+                if len(line) > _MAX_LINE_BYTES:
+                    logger.warning(
+                        "TCP: oversized message from %s (%d bytes) — closing",
+                        addr, len(line),
+                    )
+                    return   # finally-block still runs cleanup
+
+                # Cap the number of lines an unauthenticated peer can push. This
+                # bounds both a malformed-message flood and a token brute-force.
+                if user_id is None:
+                    preauth_lines += 1
+                    if preauth_lines > _MAX_PREAUTH_MESSAGES:
+                        logger.warning(
+                            "TCP: %s sent %d messages without authenticating — closing",
+                            addr, preauth_lines,
+                        )
+                        return
 
                 # ── Parse ──────────────────────────────────────────────────
                 try:
@@ -145,10 +184,16 @@ async def handle_client(
                 if user_id is None:
                     user_id = await _resolve_token(msg.token, db_pool, redis_client)
                     if user_id is None:
+                        auth_failures += 1
                         logger.warning(
-                            "TCP: unknown token from %s: %s***",
-                            addr, msg.token[:6],
+                            "TCP: unknown token from %s: %s*** (%d/%d)",
+                            addr, msg.token[:6], auth_failures, _MAX_AUTH_FAILURES,
                         )
+                        if auth_failures >= _MAX_AUTH_FAILURES:
+                            logger.warning(
+                                "TCP: too many bad tokens from %s — closing", addr,
+                            )
+                            return
                         # Keep reading — the user may reconnect with a correct token.
                         continue
                     await _mark_connected(user_id, db_pool)

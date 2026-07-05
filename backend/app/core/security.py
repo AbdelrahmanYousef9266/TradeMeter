@@ -41,7 +41,10 @@ def decode_jwt(token: str) -> dict:
             algorithms=[settings.jwt_algorithm],
         )
     except JWTError as exc:
-        raise HTTPException(status_code=401, detail=f"Invalid or expired token: {exc}")
+        # Log the specific reason server-side; never echo library internals to
+        # the client (they aid token-forgery probing and leak the JWT lib in use).
+        logger.info("JWT validation failed: %s", exc)
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
 # ── NT connection token ────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ Run with:
     cd backend && pytest tests/test_phase2.py -v
 """
 
+import string
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -139,9 +140,12 @@ def test_generate_nt_token_format():
         token = generate_nt_token()
         assert token.startswith("TM-"), f"Token does not start with 'TM-': {token!r}"
         assert len(token) == 9, f"Token length is {len(token)}, expected 9: {token!r}"
-        # Chars after "TM-" should be uppercase alphanumeric
+        # Chars after "TM-" should be uppercase letters or digits. Note: an
+        # all-digit suffix is valid, so `.isupper()` (which is False when there
+        # are no cased chars) must NOT be used here — check alphabet membership.
         suffix = token[3:]
-        assert suffix.isalnum() and suffix.isupper(), f"Unexpected chars in suffix: {suffix!r}"
+        allowed = set(string.ascii_uppercase + string.digits)
+        assert all(c in allowed for c in suffix), f"Unexpected chars in suffix: {suffix!r}"
 
 
 # ── Test 6: hash / verify round-trip ─────────────────────────────────────────

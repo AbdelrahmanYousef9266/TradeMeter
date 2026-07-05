@@ -13,20 +13,46 @@ Features (16 total):
 """
 
 from collections import deque
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.models.tick import Tick
 
 
 # ── Eastern Time helper ────────────────────────────────────────────────────
 
+def _nth_sunday(year: int, month: int, n: int) -> int:
+    """Day-of-month of the *n*-th Sunday (1-based) in the given month."""
+    first = datetime(year, month, 1)
+    days_to_first_sunday = (6 - first.weekday()) % 7   # Mon=0 … Sun=6
+    return 1 + days_to_first_sunday + (n - 1) * 7
+
+
+def _is_us_eastern_dst(utc_dt) -> bool:
+    """
+    Whether US Eastern observes Daylight Saving Time at this UTC instant.
+
+    Post-2007 rule: DST runs from the 2nd Sunday of March 02:00 EST (07:00 UTC)
+    to the 1st Sunday of November 02:00 EDT (06:00 UTC). A precise boundary
+    matters because playback replays bars from arbitrary historical dates — a
+    fixed month heuristic misclassifies ~3 weeks each March and shifts session
+    minutes, VWAP reset, power hour, and the session-end timeout by an hour.
+    """
+    if utc_dt.tzinfo is not None:
+        utc_dt = utc_dt.astimezone(timezone.utc).replace(tzinfo=None)
+    year      = utc_dt.year
+    dst_start = datetime(year,  3, _nth_sunday(year,  3, 2), 7)   # 07:00 UTC
+    dst_end   = datetime(year, 11, _nth_sunday(year, 11, 1), 6)   # 06:00 UTC
+    return dst_start <= utc_dt < dst_end
+
+
 def _to_et(utc_dt):
     """
-    Convert a UTC-aware datetime to Eastern Time.
-    Approximates DST: April–October = EDT (UTC-4), otherwise EST (UTC-5).
-    Accurate enough for US equity market hours (closed weekends + holidays).
+    Convert a UTC datetime to Eastern wall-clock time (EST/EDT), accounting for
+    the exact US DST transition dates. Callers read .hour/.date()/.time() off the
+    result; the returned datetime keeps its original tzinfo but is clock-shifted
+    to ET (matching the long-standing behavior of this helper).
     """
-    offset = timedelta(hours=-4) if 4 <= utc_dt.month <= 10 else timedelta(hours=-5)
+    offset = timedelta(hours=-4) if _is_us_eastern_dst(utc_dt) else timedelta(hours=-5)
     return utc_dt + offset
 
 
