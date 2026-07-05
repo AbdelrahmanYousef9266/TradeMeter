@@ -32,6 +32,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         // suppress repeated "token not set" spam — reset when a valid token is seen
         private bool _tokenWarningLogged;
 
+        // ── Historical bulk-import state ────────────────────────────────────────
+        private int  _histBarsSent;        // count of historical bars streamed
+        private bool _histConnLogged;      // one-time "connected" log for the blast
+        private bool _histAborted;         // connection gave up — stop trying
+
         // ── Lifecycle ──────────────────────────────────────────────────────────
         protected override void OnStateChange()
         {
@@ -48,6 +53,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 TradeMeterHost        = "127.0.0.1";
                 TradeMeterPort        = 5000;
                 SendDataToForm        = true;
+                SendHistorical        = false;
                 EnableLogging         = true;
                 ReconnectDelaySeconds = 5;
             }
@@ -57,6 +63,17 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.Realtime)
             {
+                // If we were bulk-sending chart history, that phase ends here.
+                // Report the total and drop the historical connection; the live
+                // reconnect loop opens its own fresh connection below.
+                if (SendHistorical)
+                {
+                    if (EnableLogging && !_histAborted)
+                        Print(string.Format(
+                            "TradeMeter: historical transmission complete — {0} bars sent",
+                            _histBarsSent));
+                    Disconnect();
+                }
                 ConnectToTradeMeter();
             }
             else if (State == State.Terminated)
@@ -249,6 +266,85 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        // ── Historical bulk send ───────────────────────────────────────────────
+
+        // Stream one historical bar as a "hist" close, opening a dedicated
+        // connection on demand and throttling so the socket/backend aren't
+        // overwhelmed by a 23k-bar blast. Runs on the historical calculation
+        // thread, where brief sleeps are acceptable.
+        private void SendHistoricalBar()
+        {
+            if (!EnsureHistoricalConnection())
+                return;   // could not connect / aborted — message already logged
+
+            SendBarData("hist", Time[0], Open[0], High[0], Low[0], Close[0],
+                        (long)Volume[0], logSend: false);
+            _histBarsSent++;
+
+            // Batch throttle: a short pause every 50 bars keeps ~23k bars flowing
+            // in a minute or two without saturating the TCP socket or the backend.
+            if (_histBarsSent % 50 == 0)
+            {
+                try { Thread.Sleep(5); }
+                catch (ThreadInterruptedException) { }
+            }
+        }
+
+        // Ensure a TCP connection exists for the historical blast. Retries a few
+        // times on failure, then aborts (rather than hanging the strategy enable)
+        // with a clear message. The realtime reconnect thread is not running yet
+        // during State.Historical, so it is safe to use _tcpClient/_stream here.
+        private bool EnsureHistoricalConnection()
+        {
+            if (_histAborted)
+                return false;
+
+            lock (_lock)
+            {
+                if (_tcpClient != null && _tcpClient.Connected)
+                    return true;
+            }
+
+            for (int attempt = 1; attempt <= 3; attempt++)
+            {
+                try
+                {
+                    TcpClient client = new TcpClient();
+                    client.Connect(TradeMeterHost, TradeMeterPort);
+
+                    lock (_lock)
+                    {
+                        _tcpClient = client;
+                        _stream    = client.GetStream();
+                    }
+
+                    if (EnableLogging && !_histConnLogged)
+                    {
+                        Print(string.Format(
+                            "TradeMeter: historical import connected to {0}:{1} — streaming chart history",
+                            TradeMeterHost, TradeMeterPort));
+                        _histConnLogged = true;
+                    }
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    if (EnableLogging)
+                        Print(string.Format(
+                            "TradeMeter: historical connect attempt {0}/3 failed — {1}",
+                            attempt, ex.Message));
+                    try { Thread.Sleep(500); }
+                    catch (ThreadInterruptedException) { return false; }
+                }
+            }
+
+            _histAborted = true;
+            if (EnableLogging)
+                Print("TradeMeter: historical transmission ABORTED — could not reach the backend. "
+                      + "Check the backend is running and Training Mode is ON, then re-enable the strategy.");
+            return false;
+        }
+
         // ── NinjaScript event handlers ─────────────────────────────────────────
 
         protected override void OnBarUpdate()
@@ -256,6 +352,19 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Only process the primary bar series.
             if (BarsInProgress != 0)
                 return;
+
+            // ── Historical bulk import ──────────────────────────────────────
+            // While the chart's historical bars load (State.Historical), stream
+            // each one as a "hist" bar close IF the user asked for it. Every
+            // historical bar is already final, so we send the current bar [0]
+            // exactly once. Default (SendHistorical=false) skips history, so
+            // normal live-only behavior is unchanged.
+            if (State == State.Historical)
+            {
+                if (SendHistorical && CurrentBar >= 0)
+                    SendHistoricalBar();
+                return;
+            }
 
             // With Calculate.OnEachTick, IsFirstTickOfBar is true on the very first
             // tick that belongs to the new (current) bar — meaning the previous bar
@@ -348,16 +457,24 @@ namespace NinjaTrader.NinjaScript.Strategies
         public bool SendDataToForm { get; set; }
 
         [NinjaScriptProperty]
+        [Display(Name = "Send Historical Bars",
+                 Description = "Bulk-import the chart's loaded history (bar_type 'hist') on enable, instead of only live/playback bars. "
+                             + "Turn ON Training Mode in the dashboard FIRST — the backend rejects historical bars when training mode is off. "
+                             + "Set the chart's 'Days to load', enable the strategy, watch the training banner count bars, then turn this OFF for live use.",
+                 Order = 6, GroupName = "TradeMeter")]
+        public bool SendHistorical { get; set; }
+
+        [NinjaScriptProperty]
         [Display(Name = "Enable Logging",
                  Description = "Log connection events and bar sends to the NinjaTrader output window. Disable during live trading to reduce noise.",
-                 Order = 6, GroupName = "TradeMeter")]
+                 Order = 7, GroupName = "TradeMeter")]
         public bool EnableLogging { get; set; }
 
         [NinjaScriptProperty]
         [Range(1, 60)]
         [Display(Name = "Reconnect Delay (seconds)",
                  Description = "How long to wait before retrying after a connection failure.",
-                 Order = 7, GroupName = "TradeMeter")]
+                 Order = 8, GroupName = "TradeMeter")]
         public int ReconnectDelaySeconds { get; set; }
 
         #endregion

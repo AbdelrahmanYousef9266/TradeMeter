@@ -32,6 +32,10 @@ class RawMessage(BaseModel):
         """
         Parse TOKEN|TIMESTAMP|SYMBOL|OPEN|HIGH|LOW|CLOSE|VOLUME|BAR_TYPE\\n
 
+        BAR_TYPE is passed through unchanged; any non-"tick" value (e.g. "1min"
+        or "hist" for bulk-imported historical bars) is treated downstream as a
+        bar close and flows through the full ML/storage path.
+
         Raises ValueError with a descriptive message on any format error.
         """
         line = raw.strip()

@@ -25,6 +25,7 @@ Flow per bar close:
 import asyncio
 import json
 import logging
+import time
 import uuid as _uuid
 from datetime import datetime
 
@@ -93,6 +94,29 @@ def training_status(user_id: str) -> dict:
         "bars_ingested":     _training_bar_count.get(user_id, 0),
         "sessions_ingested": len(_training_sessions.get(user_id, ())),
     }
+
+
+# ── Historical bulk-import guard ─────────────────────────────────────────────
+#
+# The NinjaTrader strategy can blast weeks of chart history in seconds using
+# bar_type "hist". Those bars must ONLY be ingested while training mode is on —
+# otherwise a stray SendHistorical=true would pour historical bars into the live
+# dataset and fight the monotonic watermark. When rejected we log at most once
+# per user per interval so a 23k-bar blast can't flood the log.
+_hist_reject_warn_at: dict[str, float] = {}
+_HIST_REJECT_WARN_INTERVAL = 30.0   # seconds between warnings per user
+
+
+def _warn_hist_rejected(user_id: str) -> None:
+    now  = time.monotonic()
+    last = _hist_reject_warn_at.get(user_id, 0.0)
+    if now - last >= _HIST_REJECT_WARN_INTERVAL:
+        _hist_reject_warn_at[user_id] = now
+        logger.warning(
+            "Ingestion: historical bar received for user %s but training mode is "
+            "off — enable Training Mode before bulk-importing history (bars ignored)",
+            user_id,
+        )
 
 
 # ── Idempotency / monotonic-order guard ──────────────────────────────────────
@@ -208,6 +232,15 @@ async def _process_entry(
 
     user_id = str(tick.user_id)
     training = is_training_mode(user_id)
+
+    # ── 2a. HISTORICAL-IMPORT GATE — "hist" bars require training mode ────
+    # Bulk-imported historical bars (bar_type "hist") are a bar close like any
+    # other and flow through the full ML/storage path, but only when the user
+    # has training mode ON. Rejecting them otherwise keeps accidental imports
+    # out of the live dataset and away from the live watermark.
+    if tick.bar_type.lower() == "hist" and not training:
+        _warn_hist_rejected(user_id)
+        return
 
     # ── 2b. IDEMPOTENCY GATE — skip duplicate / out-of-order bars ─────────
     # Must run before any stateful work (feature engine, DB writes, learning)

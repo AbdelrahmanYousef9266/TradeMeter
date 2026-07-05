@@ -63,8 +63,26 @@ In the parameter dialog you will see a **TradeMeter** group with these fields:
 | **TradeMeter Host** | `127.0.0.1` for local. Enter your server or Tailscale IP for remote. |
 | **TradeMeter Port** | `5000` (leave default unless you changed `NT_TCP_PORT` in your `.env`) |
 | **Send Data To TradeMeter** | Leave checked (`true`) to enable streaming |
+| **Send Historical Bars** | Leave **unchecked** (`false`) for normal live use. Check it only to bulk-import chart history — see "Bulk-import" below. |
 | **Enable Logging** | Check this during setup so you can verify the connection in the output window |
 | **Reconnect Delay (seconds)** | Leave at `5` |
+
+### Bulk-importing chart history (optional)
+
+To load weeks of history into TradeMeter in seconds instead of replaying in real time:
+
+1. In the TradeMeter dashboard, turn **Training Mode ON** (required — the backend
+   rejects historical bars when it is off).
+2. Set the chart's **Days to load** (right-click chart → Data Series) to how much
+   history you want, e.g. `60`.
+3. Set **Send Historical Bars = true** and enable the strategy. The history streams
+   as a throttled burst; the output window prints
+   `historical transmission complete — N bars sent` when it finishes.
+4. Watch the dashboard **Training banner** count the bars.
+5. When done, set **Send Historical Bars = false** and turn **Training Mode OFF**
+   for live use.
+
+Full details in [README.md](README.md#bulk-importing-chart-history-weeks-of-data-in-seconds).
 
 ### Where to find your Connection Token
 
