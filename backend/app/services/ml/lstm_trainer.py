@@ -47,9 +47,17 @@ def label_from_move(move: float, atr: float) -> int:
 
 
 async def count_available_bars(db_conn, user_id) -> int:
-    """How many bar closes does this user have in TimescaleDB?"""
+    """
+    How many DISTINCT-timestamp bar closes does this user have?
+
+    Counts distinct timestamps, not raw rows: replaying the same historical
+    session in training mode inserts duplicate-timestamp bars, and counting the
+    copies would falsely inflate the LSTM activation gate (MIN_BARS_TO_ACTIVATE).
+    Training-tagged bars still count — replayed history is legitimate data — but
+    each timestamp counts once.
+    """
     row = await db_conn.fetchrow(
-        "SELECT COUNT(*) AS n FROM ticks WHERE user_id = $1 AND bar_type != 'tick'",
+        "SELECT COUNT(DISTINCT time) AS n FROM ticks WHERE user_id = $1 AND bar_type != 'tick'",
         _as_uuid(user_id),
     )
     return row["n"] if row else 0
@@ -67,11 +75,18 @@ async def build_training_data(db_conn, user_id):
       SELL (0) if close[t+1] < close[t] by more than 0.5 * ATR
       HOLD (1) otherwise
     """
+    # Deduplicate by timestamp so a session replayed multiple times in training
+    # mode can't feed the LSTM duplicate sequences (which would bias it toward
+    # whichever session was replayed most) or double-count toward the data gate.
+    # DISTINCT ON (time) keeps exactly one row per timestamp; ORDER BY time ASC,
+    # is_training ASC makes it prefer the live row over a training copy when both
+    # exist. Training-tagged bars are still included — the fix is dedup, not
+    # exclusion. The result is strictly increasing in time with no duplicates.
     rows = await db_conn.fetch(
-        """SELECT time, open, high, low, close, volume, bar_type
+        """SELECT DISTINCT ON (time) time, open, high, low, close, volume, bar_type
            FROM ticks
            WHERE user_id = $1 AND bar_type != 'tick'
-           ORDER BY time ASC""",
+           ORDER BY time ASC, is_training ASC""",
         _as_uuid(user_id),
     )
 

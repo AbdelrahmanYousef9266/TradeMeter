@@ -186,7 +186,9 @@ class _E2EConn:
         return self.rows
 
     async def fetchrow(self, q, *a):
-        if "COUNT(*)" in q:
+        # count_available_bars now counts DISTINCT timestamps (dedup fix); the
+        # synthetic rows all have distinct times, so the count is len(rows).
+        if "COUNT(" in q:
             return {"n": len(self.rows)}
         return None
 

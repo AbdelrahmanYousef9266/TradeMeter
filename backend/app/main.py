@@ -32,6 +32,7 @@ from app.api.routes.models              import router as models_router
 from app.api.routes.champion_challenger import router as cc_router
 from app.api.routes.training            import router as training_router
 from app.api.routes.system              import router as system_router
+from app.api.routes.admin               import router as admin_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -200,6 +201,7 @@ app.include_router(models_router,       prefix="/models",      tags=["models"])
 app.include_router(cc_router,           prefix="/cc",          tags=["champion-challenger"])
 app.include_router(training_router,     prefix="/training",    tags=["training"])
 app.include_router(system_router,       prefix="/system",      tags=["system"])
+app.include_router(admin_router,         prefix="/admin",       tags=["admin"])
 
 
 @app.get("/health", tags=["system"])
