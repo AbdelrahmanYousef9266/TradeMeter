@@ -12,6 +12,7 @@ import AfkStream            from './pages/AfkStream'
 import Settings             from './pages/Settings'
 import ModelSettings        from './pages/ModelSettings'
 import ChampionChallenger   from './pages/ChampionChallenger'
+import Data                 from './pages/Data'
 
 class ErrorBoundary extends Component {
   state = { hasError: false, error: null }
@@ -119,6 +120,7 @@ function App() {
             <Route path="/stream" element={<StreamDashboard />} />
             <Route path="/stream/afk" element={<AfkStream />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/data" element={<Data />} />
             <Route path="/models/:modelName" element={<ModelSettings />} />
             <Route path="/champion-challenger" element={<ChampionChallenger />} />
           </Route>

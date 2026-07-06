@@ -69,10 +69,11 @@ export default function Connect() {
       justifyContent: 'center',
       padding: '32px 16px',
     }}>
-      <div style={{ marginBottom: 32, textAlign: 'center' }}>
+      <div style={{ marginBottom: 28, textAlign: 'center' }}>
         <h1 style={{ fontSize: 22, fontWeight: 500, marginBottom: 6 }}>Connect NinjaTrader</h1>
-        <p style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
-          One-time setup to stream live market data
+        <p style={{ color: 'var(--text-secondary)', fontSize: 13, maxWidth: 380 }}>
+          Optional — stream live market data from NinjaTrader 8. You can also skip
+          this and explore the dashboard with your existing data.
         </p>
       </div>
 
@@ -83,6 +84,37 @@ export default function Connect() {
         onReset={handleReset}
         onContinue={() => navigate('/dashboard')}
       />
+
+      {/* Skip: NT connection is not required to use the dashboard. */}
+      {!connected && (
+        <>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 12,
+            width: '100%', maxWidth: 420, margin: '24px 0 20px',
+            color: 'var(--text-tertiary)', fontSize: 12,
+          }}>
+            <div style={{ flex: 1, height: 1, background: 'var(--border-subtle)' }} />
+            or
+            <div style={{ flex: 1, height: 1, background: 'var(--border-subtle)' }} />
+          </div>
+
+          <button
+            onClick={() => navigate('/dashboard')}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+              fontSize: 14, fontWeight: 500, padding: '11px 22px', borderRadius: 10,
+              background: 'var(--surface-2)', color: 'var(--text-primary)',
+              border: '0.5px solid var(--border)',
+            }}
+          >
+            Go to Dashboard →
+          </button>
+          <p style={{ marginTop: 10, fontSize: 11, color: 'var(--text-tertiary)', textAlign: 'center', maxWidth: 340 }}>
+            Levels, P&amp;L history, data coverage and LSTM status all work without a
+            live connection. Connect anytime from the header.
+          </p>
+        </>
+      )}
     </div>
   )
 }

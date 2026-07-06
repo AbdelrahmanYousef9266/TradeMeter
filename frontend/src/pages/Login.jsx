@@ -7,6 +7,11 @@ export default function Login() {
   const navigate = useNavigate()
 
   useEffect(() => {
+    // Reset the post-login landing one-shot so the next successful sign-in
+    // re-evaluates whether to show the Connect choice screen (NT off) or go
+    // straight to the dashboard (NT on).
+    sessionStorage.removeItem('tm_login_landing')
+
     // If already authenticated, skip the login page
     api.get('/auth/me')
       .then(() => navigate('/dashboard', { replace: true }))

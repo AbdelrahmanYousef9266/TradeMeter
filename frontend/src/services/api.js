@@ -34,6 +34,8 @@ export const getHistory            = (params) => api.get('/market/history',     
 export const getMarketStatus       = ()       => api.get('/market/status')
 export const getRecentBars         = (limit = 200) => api.get(`/market/bars?limit=${limit}`)
 export const getDataCoverage       = ()       => api.get('/market/coverage')
+export const getDataSummary        = ()       => api.get('/market/data-summary')
+export const getDataDays           = (month)  => api.get('/market/data-days', { params: { month } })
 export const getPredictionsHistory = (params) => api.get('/predictions/history', { params })
 export const getLatestPredictions  = ()       => api.get('/predictions/latest')
 
