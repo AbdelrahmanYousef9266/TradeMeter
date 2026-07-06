@@ -21,18 +21,28 @@ RAW PRICE BARS (`ticks`):
     now that the look-ahead mechanics are fixed. Pass no flag / --include-bars to
     also delete the price history for a total wipe.
 
+LEVELS-ONLY MODE (--levels-only):
+    A lighter, surgical reset that deletes ONLY the model_levels rows (the
+    XP/level ladder) and keeps EVERYTHING else — ticks, predictions, cc_history,
+    and all model_state weights. Use this when duplicate ingestion inflated XP
+    and levels (e.g. bars sent multiple times each awarded XP multiple times) but
+    the learned weights are fine. After it, models restart at Level 1 but keep
+    everything they have actually learned — on the next pipeline load the XP
+    trackers default to level 1 while the River/LSTM weights still restore from
+    model_state. No retraining needed; the ladder just recounts from real bars.
+
 USAGE
 -----
     cd backend
-    python -m scripts.reset_user_data --email you@example.com --keep-bars
-    python -m scripts.reset_user_data --email you@example.com            # also deletes bars
+    python -m scripts.reset_user_data --email you@example.com --keep-bars       # full reset, keep bars
+    python -m scripts.reset_user_data --email you@example.com                   # full reset, also delete bars
+    python -m scripts.reset_user_data --email you@example.com --levels-only     # only reset XP/levels
 
 The script prints exactly what it will delete (with row counts) and requires you
 to type RESET to confirm before anything is deleted.
 
 NOTE: run this while the backend is stopped (or restart it afterward). On next
-start everything re-initializes cleanly from the emptied tables — models at
-level 1 with fresh weights, LSTM dormant, watermark reseeded from remaining bars.
+start everything re-initializes cleanly from the emptied tables.
 """
 
 import argparse
@@ -42,7 +52,12 @@ import sys
 import asyncpg
 
 from app.core.config import settings
-from app.services.user_reset import count_user_data, reset_user_data
+from app.services.user_reset import (
+    count_user_data,
+    reset_user_data,
+    count_levels,
+    reset_levels_only,
+)
 
 
 def _parse_args(argv=None) -> argparse.Namespace:
@@ -57,6 +72,13 @@ def _parse_args(argv=None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--email", required=True, help="Email of the user to reset.")
+    parser.add_argument(
+        "--levels-only", action="store_true",
+        help="Delete ONLY the XP/level ladder (model_levels). Keeps ticks, predictions, "
+             "cc_history, and all model weights. Use when duplicate ingestion inflated "
+             "XP/levels but the learned weights are fine — models restart at Level 1 but "
+             "keep everything learned. Ignores the bar flags below.",
+    )
     bars = parser.add_mutually_exclusive_group()
     bars.add_argument(
         "--keep-bars", dest="keep_bars", action="store_true", default=True,
@@ -69,7 +91,42 @@ def _parse_args(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-async def _run(email: str, keep_bars: bool) -> int:
+def _confirm() -> bool:
+    try:
+        answer = input('Type RESET to confirm (anything else aborts): ')
+    except EOFError:
+        answer = ""
+    if answer.strip() != "RESET":
+        print("Aborted — nothing was deleted.")
+        return False
+    return True
+
+
+async def _run_levels_only(conn, user) -> int:
+    """Delete only the XP/level ladder, keeping weights and all other data."""
+    user_id = user["id"]
+    n = await count_levels(conn, user_id)
+
+    print()
+    print(f"About to reset ONLY the XP/level ladder for: {user['email']}  (user_id={user_id})")
+    print("The following rows will be PERMANENTLY DELETED:")
+    print(f"    {'model_levels':<14} {n:>10,} rows   ← XP / levels / streaks")
+    print("KEPT (untouched): ticks, predictions, cc_history, model_state (all learned weights)")
+    print()
+
+    if not _confirm():
+        return 1
+
+    deleted = await reset_levels_only(conn, user_id)
+    print()
+    print(f"✓ Levels reset. Deleted {deleted:,} model_levels row(s).")
+    print("Models keep everything they learned (weights preserved) and restart at Level 1.")
+    print("Restart the backend (or it will happen on the next pipeline load): XP trackers")
+    print("initialize at level 1 while the River/LSTM weights restore from model_state.")
+    return 0
+
+
+async def _run(email: str, keep_bars: bool, levels_only: bool) -> int:
     include_bars = not keep_bars
     conn = await asyncpg.connect(dsn=settings.database_url)
     try:
@@ -77,6 +134,9 @@ async def _run(email: str, keep_bars: bool) -> int:
         if user is None:
             print(f"✗ No user found with email {email!r}. Nothing to do.")
             return 1
+
+        if levels_only:
+            return await _run_levels_only(conn, user)
 
         user_id = user["id"]
         counts = await count_user_data(conn, user_id, include_bars=include_bars)
@@ -92,12 +152,7 @@ async def _run(email: str, keep_bars: bool) -> int:
             print(f"    {'ticks':<14} {'(kept)':>10}          ← raw price bars preserved (--keep-bars)")
         print()
 
-        try:
-            answer = input('Type RESET to confirm (anything else aborts): ')
-        except EOFError:
-            answer = ""
-        if answer.strip() != "RESET":
-            print("Aborted — nothing was deleted.")
+        if not _confirm():
             return 1
 
         deleted = await reset_user_data(conn, user_id, include_bars=include_bars)
@@ -121,7 +176,7 @@ async def _run(email: str, keep_bars: bool) -> int:
 
 def main() -> None:
     args = _parse_args()
-    sys.exit(asyncio.run(_run(args.email, args.keep_bars)))
+    sys.exit(asyncio.run(_run(args.email, args.keep_bars, args.levels_only)))
 
 
 if __name__ == "__main__":

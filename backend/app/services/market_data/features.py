@@ -270,8 +270,13 @@ class FeatureEngine:
 _engines: dict[str, FeatureEngine] = {}
 
 
-def get_engine(user_id: str) -> FeatureEngine:
-    """Return the FeatureEngine for this user, creating one if it doesn't exist."""
+def get_engine(user_id) -> FeatureEngine:
+    """Return the FeatureEngine for this user, creating one if it doesn't exist.
+
+    Keyed by the canonical str(user_id) so a str and a uuid.UUID for the same
+    user never map to two different engines.
+    """
+    user_id = str(user_id)
     if user_id not in _engines:
         _engines[user_id] = FeatureEngine()
     return _engines[user_id]

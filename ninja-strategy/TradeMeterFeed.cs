@@ -33,9 +33,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool _tokenWarningLogged;
 
         // ── Historical bulk-import state ────────────────────────────────────────
-        private int  _histBarsSent;        // count of historical bars streamed
-        private bool _histConnLogged;      // one-time "connected" log for the blast
-        private bool _histAborted;         // connection gave up — stop trying
+        private int      _histBarsSent;        // count of UNIQUE historical bars streamed
+        private bool     _histConnLogged;      // one-time "connected" log for the blast
+        private bool     _histAborted;         // connection gave up — stop trying
+        private DateTime _lastHistBarTime = DateTime.MinValue;  // dedup guard: last bar time sent
 
         // ── Lifecycle ──────────────────────────────────────────────────────────
         protected override void OnStateChange()
@@ -59,7 +60,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.Configure)
             {
-                // Nothing required here.
+                // Reset historical-import counters so a disable/re-enable starts a
+                // fresh blast (and a fresh dedup baseline) rather than resuming.
+                _histBarsSent    = 0;
+                _histConnLogged  = false;
+                _histAborted     = false;
+                _lastHistBarTime = DateTime.MinValue;
             }
             else if (State == State.Realtime)
             {
@@ -274,11 +280,23 @@ namespace NinjaTrader.NinjaScript.Strategies
         // thread, where brief sleeps are acceptable.
         private void SendHistoricalBar()
         {
+            // Defensive de-duplication. OnBarUpdate can fire more than once for the
+            // same bar timestamp (e.g. Tick Replay enabled on the series, or an
+            // OnEachTick intrabar rebuild), which is what caused ~2.75 copies per
+            // bar. Historical bars are delivered in ascending time order, so skip
+            // anything that is not strictly newer than the last bar we sent. This
+            // guarantees exactly one send per unique bar timestamp — and the counter
+            // below (used in the completion log) then reflects unique bars only.
+            DateTime barTime = Time[0];
+            if (barTime <= _lastHistBarTime)
+                return;
+
             if (!EnsureHistoricalConnection())
                 return;   // could not connect / aborted — message already logged
 
-            SendBarData("hist", Time[0], Open[0], High[0], Low[0], Close[0],
+            SendBarData("hist", barTime, Open[0], High[0], Low[0], Close[0],
                         (long)Volume[0], logSend: false);
+            _lastHistBarTime = barTime;
             _histBarsSent++;
 
             // Batch throttle: a short pause every 50 bars keeps ~23k bars flowing
@@ -366,11 +384,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
-            // With Calculate.OnEachTick, IsFirstTickOfBar is true on the very first
-            // tick that belongs to the new (current) bar — meaning the previous bar
-            // (index [1]) has just closed and its data is final. This is the standard
-            // NinjaScript pattern for detecting a bar close without switching to
-            // Calculate.OnBarClose (which would prevent OnMarketData from firing).
+            // REQUIRES Calculate = Calculate.OnEachTick (set in SetDefaults). Under
+            // that mode IsFirstTickOfBar is true on exactly ONE tick per bar — the
+            // first tick of the new bar — meaning the previous bar (index [1]) has
+            // just closed and is final. That is what guarantees exactly one live
+            // send per closed bar (combined with the BarsInProgress==0 guard above).
+            // Do NOT change Calculate to OnBarClose: it would stop OnMarketData from
+            // firing (no live tick line). If Calculate is ever changed, this
+            // one-send-per-bar guarantee must be re-verified.
             if (!IsFirstTickOfBar)
                 return;
 

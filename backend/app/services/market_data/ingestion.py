@@ -68,32 +68,56 @@ _training_bar_count: dict[str, int]  = {}
 _training_sessions:  dict[str, set]  = {}
 
 
-def is_training_mode(user_id: str) -> bool:
-    return _training_mode.get(user_id, False)
+# All access to the training registries goes through these helpers, and each one
+# canonicalizes the key with str(user_id) as its first act. This is the single
+# source of truth for the key form: the API path passes str(user.id) and the
+# ingestion path passes str(tick.user_id) — both already canonical lowercase UUID
+# strings — but normalizing *inside* the accessor makes it impossible for any
+# caller (now or later) to set the flag under one key and read it under another
+# (e.g. a raw uuid.UUID vs its string form).
+def _key(user_id) -> str:
+    return str(user_id)
 
 
-def start_training(user_id: str) -> dict:
+def is_training_mode(user_id) -> bool:
+    return _training_mode.get(_key(user_id), False)
+
+
+def start_training(user_id) -> dict:
     """Turn training mode ON and reset this-run counters."""
-    _training_mode[user_id]      = True
-    _training_bar_count[user_id] = 0
-    _training_sessions[user_id]  = set()
-    logger.info("Training mode ON for user %s", user_id)
-    return training_status(user_id)
+    uid = _key(user_id)
+    _training_mode[uid]      = True
+    _training_bar_count[uid] = 0
+    _training_sessions[uid]  = set()
+    logger.info("Training mode ON for user %s", uid)
+    return training_status(uid)
 
 
-def stop_training(user_id: str) -> dict:
+def stop_training(user_id) -> dict:
     """Turn training mode OFF. Counters from the run are retained for the status read."""
-    _training_mode[user_id] = False
-    logger.info("Training mode OFF for user %s", user_id)
-    return training_status(user_id)
+    uid = _key(user_id)
+    _training_mode[uid] = False
+    logger.info("Training mode OFF for user %s", uid)
+    return training_status(uid)
 
 
-def training_status(user_id: str) -> dict:
+def training_status(user_id) -> dict:
+    uid = _key(user_id)
     return {
-        "training":          _training_mode.get(user_id, False),
-        "bars_ingested":     _training_bar_count.get(user_id, 0),
-        "sessions_ingested": len(_training_sessions.get(user_id, ())),
+        "training":          _training_mode.get(uid, False),
+        "bars_ingested":     _training_bar_count.get(uid, 0),
+        "sessions_ingested": len(_training_sessions.get(uid, ())),
     }
+
+
+def _note_training_bar(user_id, bar_time) -> None:
+    """Advance this-run training counters for one replayed bar (key-normalized)."""
+    uid = _key(user_id)
+    _training_bar_count[uid] = _training_bar_count.get(uid, 0) + 1
+    try:
+        _training_sessions.setdefault(uid, set()).add(get_et_time(bar_time).date())
+    except Exception:
+        pass
 
 
 # ── Historical bulk-import guard ─────────────────────────────────────────────
@@ -258,11 +282,7 @@ async def _process_entry(
             )
             return
     else:
-        _training_bar_count[user_id] = _training_bar_count.get(user_id, 0) + 1
-        try:
-            _training_sessions.setdefault(user_id, set()).add(get_et_time(tick.time).date())
-        except Exception:
-            pass
+        _note_training_bar(user_id, tick.time)
 
     # Compact bar dict reused in all outgoing payloads
     _bar = {

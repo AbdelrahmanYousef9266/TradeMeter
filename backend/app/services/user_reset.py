@@ -56,6 +56,28 @@ async def reset_user_data(conn, user_id, include_bars: bool) -> dict[str, int]:
     return deleted
 
 
+async def count_levels(conn, user_id) -> int:
+    """Number of model_levels (XP/level ladder) rows for the user."""
+    return await conn.fetchval("SELECT COUNT(*) FROM model_levels WHERE user_id = $1", user_id)
+
+
+async def reset_levels_only(conn, user_id) -> int:
+    """
+    Delete ONLY the model_levels rows — the XP/level ladder — keeping ticks,
+    predictions, cc_history, and all model_state weights intact.
+
+    Use when duplicate ingestion inflated XP/levels but the learned weights are
+    fine. On the next pipeline load the XP trackers start at level 1 (no level
+    rows → new-user defaults) while the River/LSTM weights still restore from
+    model_state, so models "keep what they learned" but the ladder resets.
+    Returns the number of level rows deleted.
+    """
+    async with conn.transaction():
+        n = _deleted_count(await conn.execute("DELETE FROM model_levels WHERE user_id = $1", user_id))
+    logger.info("Reset user %s model_levels only: %d row(s) deleted", user_id, n)
+    return n
+
+
 def purge_in_memory_state(user_id: str) -> None:
     """
     Evict a user's in-memory pipeline/feature/ingestion state on a live backend.
@@ -72,10 +94,14 @@ def purge_in_memory_state(user_id: str) -> None:
     from app.services.market_data.features import _engines
     from app.services.market_data import ingestion as ing
 
+    # All per-user registries are keyed by the canonical str(user_id); normalize
+    # here too so a UUID caller can't leave an un-purged entry behind.
+    user_id = str(user_id)
     for registry in (
         _pipelines, _pipeline_locks, _engines,
         ing._bar_state, ing._last_bar_time,
         ing._training_mode, ing._training_bar_count, ing._training_sessions,
+        ing._hist_reject_warn_at,
     ):
         registry.pop(user_id, None)
     logger.info("Purged in-memory state for user %s", user_id)

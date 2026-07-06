@@ -544,7 +544,12 @@ _pipelines: dict[str, MLPipeline] = {}
 _pipeline_locks: dict[str, asyncio.Lock] = {}
 
 
-async def get_pipeline(user_id: str, db_conn: asyncpg.Connection) -> MLPipeline:
+async def get_pipeline(user_id, db_conn: asyncpg.Connection) -> MLPipeline:
+    # Canonical key: str(user_id). The DB queries below re-parse it with
+    # _uuid.UUID(user_id), which accepts this string form, so both a str and a
+    # uuid.UUID caller resolve to the same _pipelines entry.
+    user_id = str(user_id)
+
     # Fast path — no lock needed for reads once the pipeline exists
     if user_id in _pipelines:
         return _pipelines[user_id]
