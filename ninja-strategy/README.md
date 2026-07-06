@@ -24,6 +24,8 @@ See [INSTALL.md](INSTALL.md) for the full step-by-step guide.
 | `TradeMeterPort` | int | `5000` | TCP port the TradeMeter backend is listening on. Must match `NT_TCP_PORT` in your backend `.env`. |
 | `SendDataToForm` | bool | `true` | Master enable/disable switch. Turn off to pause streaming without removing the strategy from the chart. |
 | `SendHistorical` | bool | `false` | Bulk-import the chart's loaded history on enable (see below). Requires Training Mode to be ON in the dashboard first. Leave `false` for normal live use. |
+| `OnlySendMissing` | bool | `true` | When bulk-importing, ask the backend what it already has (`GET /market/gaps`) and send only the missing/partial days instead of re-blasting the whole chart. Only applies when `SendHistorical` is on. Falls back to sending everything if the backend can't be reached. |
+| `BackendHttpPort` | int | `8000` | HTTP/API port of the backend, used for the gap check (separate from the TCP data port; same host). Range: 1–65535. |
 | `EnableLogging` | bool | `true` | Log connection events and bar-close sends to the NinjaTrader output window. Disable during active trading sessions to reduce noise. |
 | `ReconnectDelaySeconds` | int | `5` | Seconds to wait before retrying after a connection failure. Range: 1–60. |
 
@@ -64,6 +66,39 @@ Notes:
   the connection (and confirm Training Mode is ON) and re-enable the strategy.
 - If you forget to enable Training Mode, the backend drops the bars and logs a
   single throttled warning; nothing is imported. Turn it on and re-enable.
+
+### Smart gap-fill (`OnlySendMissing`, default on)
+
+By default the import is **incremental**: before the blast, the strategy calls
+`GET /market/gaps?token=…` and gets back the day-level coverage the backend already
+has. It then **skips bars on days that are already complete** (≥ 370 bars) up to the
+newest bar stored, and sends only:
+
+- days the backend has **no** bars for,
+- days that are only **partially** filled, and
+- anything **newer** than the newest bar already stored.
+
+So a re-enable after a week sends just that week; a fresh database gets everything.
+This is the same coverage the dashboard's **Data** tab shows. A per-timestamp
+de-dup remains as a second safety layer, and if the gap check fails (backend down,
+timeout, bad token) it logs a warning and falls back to sending everything — the
+import is never blocked on the check. Set `OnlySendMissing = false` to force a full
+resend.
+
+The gap endpoint replies in a deliberately simple **plain-text** format (no JSON
+parsing needed in NinjaScript), all times UTC:
+
+```
+2026-06-05,390,13:31,20:00      ← date, distinct bars, first HH:MM, last HH:MM  (one per day)
+2026-06-06,412,13:31,20:00
+LAST,2026-07-06T19:59:00Z        ← newest stored bar time
+```
+
+The output window logs, e.g.:
+```
+TradeMeter: gap check — 21 days already complete, skipping those; sending missing/partial days + everything after 2026-07-06 19:59:00Z
+TradeMeter: historical transmission complete — 480 bars sent (9074 skipped as already present)
+```
 
 ---
 

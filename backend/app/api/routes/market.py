@@ -12,14 +12,18 @@ Market data routes:
 import asyncio
 import logging
 import re
+import time
+import uuid as _uuid
 from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import PlainTextResponse
 
 from app.core.security import decode_jwt, get_current_user
 from app.db.database import get_db
 from app.models.user import User
+from app.services.market_data.tcp_listener import _resolve_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -398,6 +402,93 @@ async def data_days(
         "days":                   days,
         "complete_day_threshold": _COMPLETE_DAY_BARS,
     }
+
+
+# ── REST: gap-fill coverage for the NinjaTrader strategy ─────────────────────
+#
+# Called by the NinjaScript strategy (which holds the NT token but has no browser
+# session) so it can send only the bars the backend is missing, instead of
+# re-blasting the whole chart every time. Auth reuses the exact TCP token path:
+# SHA-256 lookup + bcrypt verify via _resolve_token. Bad-token attempts are
+# rate-limited per client IP (the HTTP analog of the TCP connection's failure cap).
+#
+# Response is DELIBERATELY plain text (not JSON) so the strategy can parse it with
+# trivial string splits — no JSON library in NinjaScript. Format, one line each:
+#     <YYYY-MM-DD>,<distinct_bars>,<first_HH:MM>,<last_HH:MM>   (one per day, UTC)
+#     LAST,<YYYY-MM-DDTHH:MM:SSZ>                               (max bar time, UTC)
+# Days combine live + training — the strategy just needs to know what EXISTS.
+# Empty body means no data (fresh DB → the strategy sends everything).
+
+_GAP_AUTH_WINDOW       = 60.0   # seconds
+_GAP_AUTH_MAX_FAILURES = 10     # bad-token attempts per IP per window → 429
+_gap_auth_failures: dict[str, list[float]] = {}
+
+
+def _gap_rate_limited(ip: str) -> bool:
+    now  = time.monotonic()
+    keep = [t for t in _gap_auth_failures.get(ip, []) if now - t < _GAP_AUTH_WINDOW]
+    _gap_auth_failures[ip] = keep
+    return len(keep) >= _GAP_AUTH_MAX_FAILURES
+
+
+def _gap_record_failure(ip: str) -> None:
+    _gap_auth_failures.setdefault(ip, []).append(time.monotonic())
+
+
+@router.get("/gaps", response_class=PlainTextResponse)
+async def data_gaps(request: Request, token: str = "") -> str:
+    """
+    NT-token-authenticated coverage summary for gap-fill imports (plain text).
+
+    Accepts the token as `?token=TM-xxx` or an `X-NT-Token` header. Returns one
+    line per day the user has bars for (live + training combined) plus a LAST
+    line with the newest bar time — all UTC. See the module note above for format.
+    """
+    ip = request.client.host if request.client else "unknown"
+    if _gap_rate_limited(ip):
+        raise HTTPException(429, "Too many bad token attempts — slow down")
+
+    token = (token or request.headers.get("X-NT-Token") or "").strip()
+    if not token:
+        raise HTTPException(401, "Missing NT token")
+
+    pool  = request.app.state.db_pool
+    redis = request.app.state.redis
+    user_id = await _resolve_token(token, pool, redis)
+    if user_id is None:
+        _gap_record_failure(ip)
+        raise HTTPException(401, "Invalid NT token")
+
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT date_trunc('day', time)::date AS day,
+                          COUNT(DISTINCT time)          AS bars,
+                          MIN(time)                     AS first_bar,
+                          MAX(time)                     AS last_bar
+                   FROM ticks
+                   WHERE user_id = $1 AND bar_type != 'tick'
+                   GROUP BY date_trunc('day', time)::date
+                   ORDER BY day ASC""",
+                _uuid.UUID(user_id),
+            )
+    except Exception as exc:
+        logger.warning("data_gaps: coverage query failed for user %s: %s", user_id, exc)
+        rows = []
+
+    lines: list[str] = []
+    last_time = None
+    for r in rows:
+        first = r["first_bar"].astimezone(timezone.utc).strftime("%H:%M") if r["first_bar"] else ""
+        last  = r["last_bar"].astimezone(timezone.utc).strftime("%H:%M") if r["last_bar"] else ""
+        lines.append(f"{r['day'].isoformat()},{r['bars']},{first},{last}")
+        if r["last_bar"] and (last_time is None or r["last_bar"] > last_time):
+            last_time = r["last_bar"]
+
+    if last_time is not None:
+        lines.append("LAST," + last_time.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 # ── WebSocket: live feed ────────────────────────────────────────────────────

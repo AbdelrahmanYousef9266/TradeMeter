@@ -1,7 +1,11 @@
 #region Using declarations
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
+using System.IO;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -34,9 +38,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         // ── Historical bulk-import state ────────────────────────────────────────
         private int      _histBarsSent;        // count of UNIQUE historical bars streamed
+        private int      _histSkipped;         // bars skipped because the backend already has them
         private bool     _histConnLogged;      // one-time "connected" log for the blast
         private bool     _histAborted;         // connection gave up — stop trying
         private DateTime _lastHistBarTime = DateTime.MinValue;  // dedup guard: last bar time sent
+
+        // ── Gap-fill state (populated from GET /market/gaps before the blast) ───
+        private const int HIST_COMPLETE_BARS = 370;   // a day with >= this many bars is "complete"
+        private HashSet<string> _completeDays = new HashSet<string>();   // "yyyy-MM-dd" (UTC) already complete
+        private DateTime _gapLastBarTime = DateTime.MinValue;            // newest bar the backend already has (UTC)
+        private bool     _gapCheckFailed;      // true → couldn't reach backend, send everything (fallback)
 
         // ── Lifecycle ──────────────────────────────────────────────────────────
         protected override void OnStateChange()
@@ -55,17 +66,31 @@ namespace NinjaTrader.NinjaScript.Strategies
                 TradeMeterPort        = 5000;
                 SendDataToForm        = true;
                 SendHistorical        = false;
+                OnlySendMissing       = true;
+                BackendHttpPort       = 8000;
                 EnableLogging         = true;
                 ReconnectDelaySeconds = 5;
             }
             else if (State == State.Configure)
             {
                 // Reset historical-import counters so a disable/re-enable starts a
-                // fresh blast (and a fresh dedup baseline) rather than resuming.
+                // fresh blast (and a fresh dedup + gap baseline) rather than resuming.
                 _histBarsSent    = 0;
+                _histSkipped     = 0;
                 _histConnLogged  = false;
                 _histAborted     = false;
                 _lastHistBarTime = DateTime.MinValue;
+                _completeDays    = new HashSet<string>();
+                _gapLastBarTime  = DateTime.MinValue;
+                _gapCheckFailed  = false;
+            }
+            else if (State == State.DataLoaded)
+            {
+                // Ask the backend what it already has BEFORE the historical bars
+                // start flowing, so the send loop can skip complete days. Runs on
+                // the strategy thread; a failure falls back to sending everything.
+                if (SendHistorical && OnlySendMissing)
+                    RunGapCheck();
             }
             else if (State == State.Realtime)
             {
@@ -76,8 +101,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     if (EnableLogging && !_histAborted)
                         Print(string.Format(
-                            "TradeMeter: historical transmission complete — {0} bars sent",
-                            _histBarsSent));
+                            "TradeMeter: historical transmission complete — {0} bars sent ({1} skipped as already present)",
+                            _histBarsSent, _histSkipped));
                     Disconnect();
                 }
                 ConnectToTradeMeter();
@@ -272,6 +297,94 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        // ── Gap check ──────────────────────────────────────────────────────────
+
+        // Ask the backend (GET /market/gaps) what bar coverage already exists so
+        // the historical loop can skip complete days. Plain-text response, parsed
+        // with simple string splits (no JSON lib). On ANY failure we set
+        // _gapCheckFailed and fall back to sending everything — never block.
+        private void RunGapCheck()
+        {
+            _completeDays   = new HashSet<string>();
+            _gapLastBarTime = DateTime.MinValue;
+            _gapCheckFailed = false;
+
+            if (string.IsNullOrEmpty(ConnectionToken))
+            {
+                _gapCheckFailed = true;   // no token → can't ask; send everything
+                return;
+            }
+
+            try
+            {
+                string url = string.Format(
+                    "http://{0}:{1}/market/gaps?token={2}",
+                    TradeMeterHost, BackendHttpPort, Uri.EscapeDataString(ConnectionToken));
+
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method          = "GET";
+                req.Timeout         = 5000;   // don't hang the strategy enable
+                req.ReadWriteTimeout = 5000;
+
+                using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                using (StreamReader reader = new StreamReader(resp.GetResponseStream()))
+                {
+                    ParseGapResponse(reader.ReadToEnd());
+                }
+
+                if (EnableLogging)
+                    Print(string.Format(
+                        "TradeMeter: gap check — {0} days already complete, skipping those; sending missing/partial days + everything after {1}",
+                        _completeDays.Count,
+                        _gapLastBarTime == DateTime.MinValue ? "(nothing yet)" : _gapLastBarTime.ToString("u", CultureInfo.InvariantCulture)));
+            }
+            catch (Exception ex)
+            {
+                _gapCheckFailed = true;
+                _completeDays.Clear();
+                _gapLastBarTime = DateTime.MinValue;
+                if (EnableLogging)
+                    Print(string.Format(
+                        "TradeMeter: gap check failed ({0}) — sending ALL historical bars (fallback). Is the backend HTTP port {1} reachable and Training Mode ON?",
+                        ex.Message, BackendHttpPort));
+            }
+        }
+
+        // Parse the plain-text gap response:
+        //   <yyyy-MM-dd>,<bars>,<firstHH:MM>,<lastHH:MM>   one per day (UTC)
+        //   LAST,<yyyy-MM-ddTHH:mm:ssZ>                    newest stored bar (UTC)
+        private void ParseGapResponse(string body)
+        {
+            if (string.IsNullOrEmpty(body))
+                return;
+
+            foreach (string rawLine in body.Split('\n'))
+            {
+                string line = rawLine.Trim();
+                if (line.Length == 0)
+                    continue;
+
+                string[] p = line.Split(',');
+                if (p[0] == "LAST")
+                {
+                    if (p.Length >= 2)
+                        DateTime.TryParse(
+                            p[1], CultureInfo.InvariantCulture,
+                            DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+                            out _gapLastBarTime);
+                }
+                else if (p.Length >= 2)
+                {
+                    int bars;
+                    if (int.TryParse(p[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out bars)
+                        && bars >= HIST_COMPLETE_BARS)
+                    {
+                        _completeDays.Add(p[0]);   // "yyyy-MM-dd" (UTC)
+                    }
+                }
+            }
+        }
+
         // ── Historical bulk send ───────────────────────────────────────────────
 
         // Stream one historical bar as a "hist" close, opening a dedicated
@@ -288,6 +401,27 @@ namespace NinjaTrader.NinjaScript.Strategies
             // guarantees exactly one send per unique bar timestamp — and the counter
             // below (used in the completion log) then reflects unique bars only.
             DateTime barTime = Time[0];
+
+            // Layer 1 — gap skip. Don't resend a bar the backend already has: its
+            // day is known complete (>= 370 bars) AND the bar is at or before the
+            // newest bar already stored. Bars on missing/partial days, and anything
+            // newer than what the backend has, still send. Skipped when the gap
+            // check failed (fallback = send everything) or OnlySendMissing is off.
+            if (OnlySendMissing && !_gapCheckFailed && _gapLastBarTime != DateTime.MinValue)
+            {
+                DateTime barUtc = barTime.ToUniversalTime();
+                string   dayKey = barUtc.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                if (_completeDays.Contains(dayKey) && barUtc <= _gapLastBarTime)
+                {
+                    _histSkipped++;
+                    return;
+                }
+            }
+
+            // Layer 2 — per-timestamp dedup. OnBarUpdate can fire more than once for
+            // the same bar timestamp (Tick Replay, or an OnEachTick intrabar rebuild),
+            // which caused ~2.75 copies per bar. Historical bars arrive in ascending
+            // time order, so skip anything not strictly newer than the last bar sent.
             if (barTime <= _lastHistBarTime)
                 return;
 
@@ -486,16 +620,32 @@ namespace NinjaTrader.NinjaScript.Strategies
         public bool SendHistorical { get; set; }
 
         [NinjaScriptProperty]
+        [Display(Name = "Only Send Missing",
+                 Description = "When bulk-importing, first ask the backend (GET /market/gaps) what it already has and send only the missing/partial days "
+                             + "instead of re-blasting the whole chart. A re-enable after a week sends just that week; a fresh database gets everything. "
+                             + "Only applies when 'Send Historical Bars' is on. If the backend can't be reached it falls back to sending everything.",
+                 Order = 7, GroupName = "TradeMeter")]
+        public bool OnlySendMissing { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 65535)]
+        [Display(Name = "Backend HTTP Port",
+                 Description = "HTTP/API port of the TradeMeter backend (default 8000), used for the gap check. Separate from the TCP data port above. "
+                             + "Uses the same TradeMeter Host.",
+                 Order = 8, GroupName = "TradeMeter")]
+        public int BackendHttpPort { get; set; }
+
+        [NinjaScriptProperty]
         [Display(Name = "Enable Logging",
                  Description = "Log connection events and bar sends to the NinjaTrader output window. Disable during live trading to reduce noise.",
-                 Order = 7, GroupName = "TradeMeter")]
+                 Order = 9, GroupName = "TradeMeter")]
         public bool EnableLogging { get; set; }
 
         [NinjaScriptProperty]
         [Range(1, 60)]
         [Display(Name = "Reconnect Delay (seconds)",
                  Description = "How long to wait before retrying after a connection failure.",
-                 Order = 8, GroupName = "TradeMeter")]
+                 Order = 10, GroupName = "TradeMeter")]
         public int ReconnectDelaySeconds { get; set; }
 
         #endregion
