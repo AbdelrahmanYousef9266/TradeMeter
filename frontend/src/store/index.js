@@ -68,14 +68,26 @@ const useStore = create((set) => ({
   setLeaderboardPnl:    (data) => set({ leaderboardPnl: data }),
   setLeaderboardLevels: (data) => set({ leaderboardLevels: data }),
 
-  // Level-up notification queue
-  levelUpQueue: [],
-  pushLevelUp: (event) => set(state => ({
-    levelUpQueue: [...state.levelUpQueue, { ...event, id: Date.now() + Math.random() }],
-  })),
-  dismissLevelUp: (id) => set(state => ({
-    levelUpQueue: state.levelUpQueue.filter(e => e.id !== id),
-  })),
+  // Single-slot level-up / CC-promotion toast (coalesced — never a growing stack).
+  // We keep ONE toast object instead of a queue that could balloon to tens of
+  // thousands of entries during a bulk import. Each new event replaces the
+  // content in place:
+  //   • seq       bumps on every event  → drives the refresh pulse + timer reset
+  //   • absorbed  counts extra events folded in while this toast has been visible
+  //               → renders as "(+N more level-ups)"
+  // Dropped events are never shown later; only the latest is displayed.
+  levelUpToast: null,
+  pushLevelUp: (event) => set(state => {
+    const prev = state.levelUpToast
+    return {
+      levelUpToast: {
+        ...event,
+        seq:      prev ? prev.seq + 1 : 0,
+        absorbed: prev ? prev.absorbed + 1 : 0,
+      },
+    }
+  }),
+  dismissLevelUp: () => set({ levelUpToast: null }),
 
   // Global settings (persisted to localStorage manually in Settings page)
   settings: {
