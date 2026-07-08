@@ -51,12 +51,24 @@ exactly like real-time playback, but far faster.
 2. Open a NinjaTrader chart for your instrument and set **Days to load** (e.g. 60)
    on the series you want (e.g. 1-minute).
 3. Add/enable **TradeMeterFeed** on that chart with **`SendHistorical = true`**
-   (and your `ConnectionToken` set). On enable, the historical blast begins.
-4. Watch the dashboard **Training banner** count the bars climbing. The NinjaTrader
+   (and your `ConnectionToken` set). The strategy connects, but bars are **refused
+   until you arm ingestion** — nothing stacks yet.
+4. In the dashboard press **Arm Ingestion**. The gate opens and the historical
+   blast begins flowing.
+5. Watch the dashboard **Training banner** count the bars climbing. The NinjaTrader
    output window prints `historical transmission complete — N bars sent` when the
    chart finishes loading and goes live.
-5. When done, set **`SendHistorical = false`** (disable/re-enable or edit the
-   parameter) and turn **Training Mode OFF** in the dashboard for normal live use.
+6. When done, **Disarm Ingestion** (optionally with *flush* to clear any tail),
+   set **`SendHistorical = false`** (disable/re-enable or edit the parameter), and
+   turn **Training Mode OFF** in the dashboard for normal live use.
+
+> **Arm gate:** enabling the strategy no longer streams into the pipeline
+> immediately. Ingestion starts **disarmed** at backend startup — incoming bars are
+> refused at the TCP intake (never queued, never stored) until you press **Arm
+> Ingestion** on the dashboard. This is independent of Training Mode: arming decides
+> *whether* bars enter the pipeline; Training Mode decides whether accepted
+> historical/out-of-order bars bypass the live watermark. For **live** use, just Arm
+> Ingestion (no Training Mode).
 
 Notes:
 - The blast is throttled (a brief pause every 50 bars) so it won't overwhelm the

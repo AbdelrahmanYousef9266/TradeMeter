@@ -23,6 +23,7 @@ from app.core.security import (
 )
 from app.core.redis import publish_tick, cache_latest_tick
 from app.models.tick import RawMessage
+from app.services.market_data.ingestion import is_ingestion_armed, note_bar_refused
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +199,15 @@ async def handle_client(
                         continue
                     await _mark_connected(user_id, db_pool)
                     logger.info("TCP: token validated → user_id=%s", user_id)
+
+                # ── Arm gate ───────────────────────────────────────────────
+                # If the user hasn't armed ingestion from the dashboard, refuse
+                # the bar outright — never publish it to the stream — so nothing
+                # stacks while the strategy is merely connected. The connection
+                # stays open; bars resume the moment the user arms.
+                if not is_ingestion_armed(user_id):
+                    note_bar_refused(user_id)
+                    continue
 
                 # ── Publish ────────────────────────────────────────────────
                 tick = {

@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.services.market_data import tcp_listener
+from app.services.market_data import tcp_listener, ingestion
 from app.services.market_data.tcp_listener import (
     handle_client,
     _MAX_BUFFER_BYTES,
@@ -23,6 +23,7 @@ from app.services.market_data.tcp_listener import (
     _MAX_AUTH_FAILURES,
     _MAX_PREAUTH_MESSAGES,
 )
+from app.services.market_data.ingestion import arm_ingestion, disarm_ingestion
 
 
 class FakeReader:
@@ -60,6 +61,16 @@ def _no_db(monkeypatch):
     """Stub the DB side-effects so no real pool is needed."""
     monkeypatch.setattr(tcp_listener, "_mark_connected", AsyncMock())
     monkeypatch.setattr(tcp_listener, "_mark_disconnected", AsyncMock())
+
+
+@pytest.fixture(autouse=True)
+def _reset_arm_gate():
+    """Each test starts from the default (disarmed) arm-gate state."""
+    ingestion._ingestion_armed.clear()
+    ingestion._disarm_log_at.clear()
+    yield
+    ingestion._ingestion_armed.clear()
+    ingestion._disarm_log_at.clear()
 
 
 @pytest.mark.asyncio
@@ -133,6 +144,8 @@ async def test_valid_bar_publishes(monkeypatch):
     monkeypatch.setattr(tcp_listener, "publish_tick", publish)
     monkeypatch.setattr(tcp_listener, "cache_latest_tick", cache)
 
+    arm_ingestion("user-123")   # gate must be armed for bars to flow
+
     writer = FakeWriter()
     await handle_client(
         FakeReader([(_valid_line() + "\n").encode()]),
@@ -146,6 +159,58 @@ async def test_valid_bar_publishes(monkeypatch):
     assert _args[1] == "user-123"
     assert _args[2]["close"] == 5840.5
     assert writer.closed is True
+
+
+# ── Arm gate ──────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_disarmed_refuses_bar(monkeypatch):
+    """Default (disarmed): a valid bar authenticates but is NEVER published/queued."""
+    resolve = AsyncMock(return_value="user-x")
+    monkeypatch.setattr(tcp_listener, "_resolve_token", resolve)
+    publish = AsyncMock()
+    cache = AsyncMock()
+    monkeypatch.setattr(tcp_listener, "publish_tick", publish)
+    monkeypatch.setattr(tcp_listener, "cache_latest_tick", cache)
+
+    # No arm_ingestion() call → user-x is disarmed by default.
+    writer = FakeWriter()
+    await handle_client(
+        FakeReader([((_valid_line() + "\n") * 5).encode()]),
+        writer, db_pool=None, redis_client=None,
+    )
+
+    resolve.assert_awaited_once()      # token still validated (connection is fine)
+    publish.assert_not_awaited()       # but every bar was refused — nothing queued
+    cache.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_armed_accepts_then_disarm_refuses(monkeypatch):
+    """Arming opens the gate; disarming closes it again mid-stream."""
+    resolve = AsyncMock(return_value="user-y")
+    monkeypatch.setattr(tcp_listener, "_resolve_token", resolve)
+    publish = AsyncMock()
+    monkeypatch.setattr(tcp_listener, "publish_tick", publish)
+    monkeypatch.setattr(tcp_listener, "cache_latest_tick", AsyncMock())
+
+    arm_ingestion("user-y")
+    writer = FakeWriter()
+    await handle_client(
+        FakeReader([((_valid_line() + "\n") * 3).encode()]),
+        writer, db_pool=None, redis_client=None,
+    )
+    assert publish.await_count == 3    # all three bars flowed while armed
+
+    # Disarm and stream again on a fresh connection → refused.
+    disarm_ingestion("user-y")
+    publish.reset_mock()
+    writer2 = FakeWriter()
+    await handle_client(
+        FakeReader([((_valid_line() + "\n") * 3).encode()]),
+        writer2, db_pool=None, redis_client=None,
+    )
+    publish.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ import Leaderboard   from '../components/dashboard/Leaderboard'
 import ModelCard      from '../components/dashboard/ModelCard'
 import LSTMCard       from '../components/dashboard/LSTMCard'
 import TrainingMode   from '../components/dashboard/TrainingMode'
+import IngestionControl from '../components/dashboard/IngestionControl'
 import TradeSignalPanel from '../components/dashboard/TradeSignalPanel'
 import LevelUpToast    from '../components/dashboard/LevelUpToast'
 import LiveChart      from '../components/chart/LiveChart'
@@ -126,6 +127,9 @@ export default function Dashboard() {
           )}
         </nav>
       </header>
+
+      {/* Ingestion arm gate — decides when strategy bars enter the pipeline */}
+      <IngestionControl />
 
       {/* Training Mode control + banner */}
       <TrainingMode />

@@ -132,6 +132,66 @@ def _note_training_bar(user_id, bar_time) -> None:
         pass
 
 
+# ── Ingestion arm gate (per-user) ────────────────────────────────────────────
+#
+# Enabling the NinjaTrader strategy immediately streams bars over TCP, so without
+# a gate they pour into 'market:raw' and stack the queue the instant the strategy
+# connects. The arm gate lets the user decide WHEN bars enter the pipeline: while
+# DISARMED (the default at startup) every incoming bar is refused at the TCP
+# intake — never queued, never stored — so the strategy can stay connected with
+# nothing accumulating. Arming from the dashboard opens the gate.
+#
+# Independent of training mode: arming controls whether bars enter the pipeline
+# at all; training mode controls whether accepted historical/out-of-order bars
+# bypass the live watermark. Uses the same canonical str(user_id) key form as the
+# training registries via _key().
+_ingestion_armed: dict[str, bool] = {}
+
+# Rate-limited "bar refused" logging so a connected-but-disarmed strategy blasting
+# bars can't flood the log. {user_id: monotonic ts of last log}
+_disarm_log_at: dict[str, float] = {}
+_DISARM_LOG_INTERVAL = 30.0   # seconds between refusal logs per user
+
+
+def is_ingestion_armed(user_id) -> bool:
+    """True if the user has armed ingestion. Default: disarmed (bars refused)."""
+    return _ingestion_armed.get(_key(user_id), False)
+
+
+def arm_ingestion(user_id) -> dict:
+    """Open the gate — incoming strategy bars start flowing into the pipeline."""
+    uid = _key(user_id)
+    _ingestion_armed[uid] = True
+    logger.info("Ingestion ARMED for user %s", uid)
+    return ingestion_armed_status(uid)
+
+
+def disarm_ingestion(user_id) -> dict:
+    """Close the gate — incoming strategy bars are refused (not queued/stored)."""
+    uid = _key(user_id)
+    _ingestion_armed[uid] = False
+    logger.info("Ingestion DISARMED for user %s", uid)
+    return ingestion_armed_status(uid)
+
+
+def ingestion_armed_status(user_id) -> dict:
+    uid = _key(user_id)
+    return {"armed": _ingestion_armed.get(uid, False)}
+
+
+def note_bar_refused(user_id) -> None:
+    """Rate-limited debug log for a bar dropped because ingestion is disarmed."""
+    uid = _key(user_id)
+    now  = time.monotonic()
+    last = _disarm_log_at.get(uid, 0.0)
+    if now - last >= _DISARM_LOG_INTERVAL:
+        _disarm_log_at[uid] = now
+        logger.debug(
+            "Ingestion disarmed for user %s — bar refused (arm from the dashboard "
+            "to begin receiving bars)", uid,
+        )
+
+
 # ── Historical bulk-import guard ─────────────────────────────────────────────
 #
 # The NinjaTrader strategy can blast weeks of chart history in seconds using

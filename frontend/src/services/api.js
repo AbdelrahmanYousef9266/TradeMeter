@@ -54,6 +54,11 @@ export const stopTraining      = () => api.post('/training/stop')
 export const getTrainingStatus = () => api.get('/training/status')
 export const flushQueue        = () => api.post('/training/flush-queue')
 
+// Ingestion arm gate — decide WHEN strategy bars enter the pipeline
+export const armIngestion       = ()              => api.post('/ingestion/arm')
+export const disarmIngestion    = (flush = false) => api.post('/ingestion/disarm', { flush })
+export const getIngestionStatus = ()              => api.get('/ingestion/status')
+
 // System resources — real CPU/RAM for the AI Lab stream panel
 export const getSystemStats    = () => api.get('/system/stats')
 
