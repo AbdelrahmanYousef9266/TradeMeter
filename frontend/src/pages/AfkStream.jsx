@@ -333,7 +333,8 @@ export default function AfkStream() {
                } : { text: '—', color: 'var(--text-muted)', bg: '#ffffff08' }} />
 
         <div style={{ flex: 1 }} />
-        <div style={{ fontSize: 9, color: 'var(--text-muted)', letterSpacing: '0.08em', textAlign: 'center' }}>
+        <ContactBadge />
+        <div style={{ fontSize: 9, color: 'var(--text-muted)', letterSpacing: '0.08em', textAlign: 'center', marginTop: 10 }}>
           streaming · no interaction
         </div>
       </aside>
@@ -419,6 +420,48 @@ function StatusTicker({ dot, text }) {
         marginLeft: 'auto', fontSize: 9.5, color: 'var(--text-muted)',
         letterSpacing: '0.14em', flexShrink: 0,
       }}>LIVE ACTIVITY</span>
+    </div>
+  )
+}
+
+// ── Contact / brand badge ─────────────────────────────────────────────────
+// A tasteful "who made this / how to reach them" mark tucked at the bottom of
+// the AI Lab column. Subtle enough not to compete with the live data, but
+// intentional. The email is a real mailto link (clickable off-stream) that still
+// reads as plain text on stream.
+const BRAND_PURPLE = '#534AB7'
+const EMAIL_PURPLE = '#8b82e8'
+
+function ContactBadge() {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 11, fontFamily: MONO,
+      padding: '10px 12px', borderRadius: 10,
+      background: 'linear-gradient(180deg, var(--surface-2, #16181d), var(--surface-1, #101216))',
+      border: '0.5px solid #ffffff14', borderLeft: `3px solid ${BRAND_PURPLE}`,
+      boxShadow: 'inset 0 1px 0 #ffffff08',
+    }}>
+      <span style={{ fontSize: 21, lineHeight: 1, flexShrink: 0 }}>🧠</span>
+      <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <span style={{
+          fontSize: 12, fontWeight: 700, letterSpacing: '0.16em',
+          color: 'var(--text-primary)',
+        }}>ADAPTIVEMIND</span>
+        <span style={{ fontSize: 9, color: 'var(--text-muted)', letterSpacing: '0.04em' }}>
+          Contact for more information
+        </span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 1 }}>
+          <span style={{
+            width: 6, height: 6, borderRadius: '50%', background: C_CPU, flexShrink: 0,
+            boxShadow: `0 0 6px ${C_CPU}`,
+          }} />
+          <a href="mailto:adaptivemindofficial@gmail.com" style={{
+            fontSize: 10.5, color: EMAIL_PURPLE, textDecoration: 'none',
+            letterSpacing: '0.01em', whiteSpace: 'nowrap', overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}>adaptivemindofficial@gmail.com</a>
+        </span>
+      </div>
     </div>
   )
 }

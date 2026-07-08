@@ -217,7 +217,7 @@ async def lstm_status(
     conn       = Depends(get_db),
 ) -> dict:
     """LSTM training status and data-availability progress."""
-    from app.services.ml.lstm_trainer import count_available_bars
+    from app.services.ml.lstm_trainer import count_available_bars, get_lstm_progress
     from app.services.ml.lstm_model import MIN_BARS_TO_ACTIVATE
 
     try:
@@ -225,6 +225,9 @@ async def lstm_status(
     except Exception as exc:
         logger.warning("lstm_status: bar count failed: %s", exc)
         bars = 0
+
+    # Live per-epoch training snapshot (empty when not currently training).
+    prog = get_lstm_progress(str(user.id))
 
     pipeline = _pipelines.get(str(user.id))
     is_trained = False
@@ -247,6 +250,13 @@ async def lstm_status(
         "last_trained":   last_trained,
         "train_accuracy": train_accuracy,
         "train_samples":  train_samples,
+        # ── Live per-epoch training progress (null when not training) ──────────
+        # Field names match what the AFK status ticker reads directly.
+        "training":       prog.get("training", False),
+        "epoch":          prog.get("epoch"),
+        "total_epochs":   prog.get("total_epochs"),
+        "current_loss":   prog.get("current_loss"),
+        "val_accuracy":   prog.get("val_accuracy"),
     }
 
 

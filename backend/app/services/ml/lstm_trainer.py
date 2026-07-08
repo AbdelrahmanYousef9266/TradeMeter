@@ -27,6 +27,41 @@ from app.services.market_data.features import FeatureEngine
 logger = logging.getLogger(__name__)
 
 
+# ── Live training-progress registry (per user) ───────────────────────────────
+#
+# LSTM training runs off the event loop in asyncio.to_thread, so there is no
+# natural place to observe mid-flight progress. This in-memory dict, keyed by
+# str(user_id) like the other per-user registries, holds a live snapshot updated
+# at the end of each epoch. GET /models/lstm/status reads it so the frontend can
+# narrate "epoch N/20" in real time. Empty (absent) means "not training".
+#
+# Field names are chosen to match what the AFK status ticker reads directly:
+# `training` (bool), `epoch`, `total_epochs`, `val_accuracy` (plus `current_loss`
+# for the Live Activity Panel). The per-epoch callback runs in the training
+# thread; a whole-dict reassignment is atomic in CPython, so the status reader
+# never sees a torn partial update.
+_training_progress: dict[str, dict] = {}
+
+
+def get_lstm_progress(user_id) -> dict:
+    """Live training snapshot for a user, or {} when not currently training."""
+    return _training_progress.get(str(user_id), {})
+
+
+def _set_lstm_progress(user_id, *, epoch, total_epochs, loss, val_acc) -> None:
+    _training_progress[str(user_id)] = {
+        "training":     True,
+        "epoch":        epoch,
+        "total_epochs": total_epochs,
+        "current_loss": None if loss is None else round(float(loss), 6),
+        "val_accuracy": None if val_acc is None else round(float(val_acc), 4),
+    }
+
+
+def _clear_lstm_progress(user_id) -> None:
+    _training_progress.pop(str(user_id), None)
+
+
 def _as_uuid(user_id) -> _uuid.UUID:
     """asyncpg requires a uuid.UUID for UUID columns — accept str or UUID."""
     return user_id if isinstance(user_id, _uuid.UUID) else _uuid.UUID(str(user_id))
@@ -161,12 +196,15 @@ async def build_training_data(db_conn, user_id):
     )
 
 
-def _train_sync(X, y, epochs: int):
+def _train_sync(X, y, epochs: int, epoch_cb=None):
     """
     Pure synchronous PyTorch training — runs in a worker thread so it does
     NOT block the asyncio event loop.
 
     Captures nothing async; all torch tensors/ops live entirely inside here.
+    If `epoch_cb` is given it is called at the end of each epoch with
+    (epoch_number, mean_epoch_loss, val_acc) for live progress reporting — a
+    cheap extra val forward-pass per epoch, no effect on the trained result.
     Returns (state_dict, val_acc, train_samples, class_counts).
     """
     # Train/validation split (80/20, chronological — no shuffle across the split)
@@ -197,6 +235,7 @@ def _train_sync(X, y, epochs: int):
     for _epoch in range(epochs):
         net.train()
         perm = torch.randperm(len(X_train_t))
+        epoch_loss = 0.0
         for b in range(n_batches):
             idx = perm[b * batch_size: (b + 1) * batch_size]
             xb, yb = X_train_t[idx], y_train_t[idx]
@@ -206,6 +245,21 @@ def _train_sync(X, y, epochs: int):
             loss = criterion(out, yb)
             loss.backward()
             optimizer.step()
+            epoch_loss += loss.item()
+
+        # Live per-epoch progress (val forward-pass is cheap; keeps the ticker honest).
+        if epoch_cb is not None:
+            net.eval()
+            with torch.no_grad():
+                if len(X_val_t) > 0:
+                    ep_pred = torch.argmax(net(X_val_t), dim=1)
+                    ep_val_acc = (ep_pred == y_val_t).float().mean().item()
+                else:
+                    ep_val_acc = 0.0
+            try:
+                epoch_cb(_epoch + 1, epoch_loss / n_batches, ep_val_acc)
+            except Exception:
+                pass   # progress reporting must never break training
 
     # Validation accuracy
     net.eval()
@@ -229,9 +283,10 @@ async def train_lstm(db_conn, user_id, epochs: int = 20,
     blocking PyTorch training runs in asyncio.to_thread so the WebSocket feed
     and ingestion keep flowing during the ~minute of training.
 
-    `progress_callback` is accepted for API compatibility but no longer invoked
-    per-epoch — the torch work runs off-loop in a thread, so per-epoch callbacks
-    back onto the event loop are dropped in favour of not blocking it.
+    `progress_callback` is accepted for API compatibility. Live per-epoch
+    progress is published to the in-memory `_training_progress` registry (read by
+    GET /models/lstm/status) rather than called back onto the event loop, since
+    the torch work runs off-loop in a thread.
 
     Returns a training results dict.
     """
@@ -248,10 +303,25 @@ async def train_lstm(db_conn, user_id, epochs: int = 20,
 
     X, y, means, stds = data
 
+    # The epoch callback runs inside the worker thread; a whole-dict reassignment
+    # in _set_lstm_progress is atomic in CPython, so the status reader is safe.
+    def _epoch_cb(epoch, loss, val_acc):
+        _set_lstm_progress(user_id, epoch=epoch, total_epochs=epochs,
+                           loss=loss, val_acc=val_acc)
+
+    # Seed the registry immediately so a status poll right after the button click
+    # already shows "training, epoch 0/N" before the first epoch completes.
+    _set_lstm_progress(user_id, epoch=0, total_epochs=epochs, loss=None, val_acc=None)
+
     # ── Off-loop: run the blocking torch training in a worker thread ──────
-    state_dict, val_acc, n_samples, class_counts = await asyncio.to_thread(
-        _train_sync, X, y, epochs,
-    )
+    try:
+        state_dict, val_acc, n_samples, class_counts = await asyncio.to_thread(
+            _train_sync, X, y, epochs, _epoch_cb,
+        )
+    finally:
+        # Always clear progress — success, failure, or cancellation — so the
+        # ticker returns to its resting state and never shows a stale "training".
+        _clear_lstm_progress(user_id)
 
     # ── Async: rebuild model from trained weights, serialize, persist ─────
     model = LSTMModel(str(user_id))
