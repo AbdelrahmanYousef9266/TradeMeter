@@ -1,6 +1,6 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import useStore from '../store'
-import { getSystemStats, getTrainingStatus, getLSTMStatus } from '../services/api'
+import { getSystemStats, getTrainingStatus, getLSTMStatus, getIngestionStatus } from '../services/api'
 import ArchitectureDiagram from '../components/ArchitectureDiagram'
 import LeaderboardRace from '../components/LeaderboardRace'
 import TradeSignalPanel from '../components/dashboard/TradeSignalPanel'
@@ -37,11 +37,15 @@ function isMarketOpen() {
 }
 
 export default function AfkStream() {
-  const { modelSignals, modelLevels, modelPnl, lastBarAt } = useStore()
+  const { modelSignals, modelLevels, modelPnl, lastBarAt, currentBar } = useStore()
 
   const [sys, setSys]           = useState({ cpu_percent: 0, ram_used_gb: 0, ram_total_gb: 0, ram_percent: 0 })
   const [training, setTraining] = useState(false)
+  const [trainQueue, setTrainQueue] = useState(0)
   const [lstm, setLstm]         = useState(null)
+  const [ing, setIng]           = useState({ armed: false, queue_pending: 0 })
+  const [symbol, setSymbol]     = useState(null)   // sticky instrument (e.g. "MES")
+  const [lstmDoneAt, setLstmDoneAt] = useState(0)  // when LSTM last finished training
   const [gpu, setGpu]           = useState(38)   // decorative — see below
   const [now, setNow]           = useState(Date.now())
 
@@ -54,12 +58,25 @@ export default function AfkStream() {
     return () => { active = false; clearInterval(id) }
   }, [])
 
-  // ── Poll training status every 2s (drives Task + AI Status) ────────────
+  // ── Poll training status every 2s (drives Task + AI Status + narration) ──
   useEffect(() => {
     let active = true
-    const poll = () => getTrainingStatus().then(r => active && setTraining(!!r.data?.training)).catch(() => {})
+    const poll = () => getTrainingStatus().then(r => {
+      if (!active) return
+      setTraining(!!r.data?.training)
+      setTrainQueue(r.data?.queue_pending ?? 0)
+    }).catch(() => {})
     poll()
     const id = setInterval(poll, 2000)
+    return () => { active = false; clearInterval(id) }
+  }, [])
+
+  // ── Poll ingestion arm-gate status every 5s (drives armed/idle narration) ──
+  useEffect(() => {
+    let active = true
+    const poll = () => getIngestionStatus().then(r => active && setIng(r.data || { armed: false, queue_pending: 0 })).catch(() => {})
+    poll()
+    const id = setInterval(poll, 5000)
     return () => { active = false; clearInterval(id) }
   }, [])
 
@@ -71,6 +88,28 @@ export default function AfkStream() {
     const id = setInterval(poll, 5000)
     return () => { active = false; clearInterval(id) }
   }, [])
+
+  // ── Sticky instrument symbol ────────────────────────────────────────────
+  // Inter-bar tick payloads carry the symbol (e.g. "MES 09-26"); bar-close
+  // payloads don't. Remember the last one seen (first token → "MES") so the
+  // narration keeps the instrument even across bars that omit it.
+  useEffect(() => {
+    const s = currentBar?.symbol
+    if (s) setSymbol(String(s).split(' ')[0])
+  }, [currentBar])
+
+  // ── Detect an LSTM training completion ──────────────────────────────────
+  // The backend trains synchronously with no live "training" flag, so the one
+  // honest signal is last_trained changing. When it does, flash a short
+  // "neural network trained" recognition. (A live epoch counter would need a
+  // backend progress signal, which doesn't exist yet — see report.)
+  const prevTrainedRef = useRef(undefined)
+  useEffect(() => {
+    const lt = lstm?.last_trained
+    if (lt === undefined || lt === null) return
+    if (prevTrainedRef.current === undefined) { prevTrainedRef.current = lt; return }  // seed; don't flash on first load
+    if (lt !== prevTrainedRef.current) { prevTrainedRef.current = lt; setLstmDoneAt(Date.now()) }
+  }, [lstm])
 
   // ── Decorative GPU gauge ────────────────────────────────────────────────
   // This system is CPU-only — there is no real GPU to read. We render a
@@ -175,6 +214,58 @@ export default function AfkStream() {
   else if (rthOpen)                          market = { text: 'OPEN',   ...GREEN }
   else                                       market = { text: 'CLOSED', ...GREY }
 
+  // ── Status narration — plain-English headline of current activity ────────
+  // Composed entirely from already-polled state, highest-priority active state
+  // wins. Dot color encodes the activity type (purple=training, green=live,
+  // amber=waiting, gray=idle).
+  const narration = useMemo(() => {
+    const PURPLE = '#8b5cf6', GREEN = C_CPU, AMBER = C_GPU, GRAY = '#565b66'
+    const inst = symbol || null
+    const hhmm = (t) => {
+      try {
+        return new Date(t).toLocaleTimeString('en-US', {
+          timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
+        })
+      } catch { return null }
+    }
+    const year = (() => {
+      try { return currentBar?.time ? new Date(currentBar.time).getFullYear() : null }
+      catch { return null }
+    })()
+
+    // 1. LSTM live training (optional backend signal — dormant unless emitted).
+    if (lstm?.training) {
+      const ep = lstm.epoch, tot = lstm.total_epochs ?? 20
+      const acc = lstm.val_accuracy != null ? ` · val acc ${Math.round(lstm.val_accuracy * 100)}%` : ''
+      return { dot: PURPLE, text: ep ? `🧬 Training neural network — epoch ${ep}/${tot}${acc}` : '🧬 Training neural network…' }
+    }
+    // 1b. LSTM just finished (real signal: last_trained changed) — brief flash.
+    if (lstmDoneAt && (now - lstmDoneAt) < 9000) {
+      const acc = lstm?.train_accuracy != null ? ` — val acc ${Math.round(lstm.train_accuracy * 100)}%` : ''
+      return { dot: PURPLE, text: `🧬 Neural network trained${acc}` }
+    }
+    // 2. Bulk import draining (training mode on + bars still queued).
+    if (training && trainQueue > 0) {
+      const ctx = [year, inst].filter(Boolean).join(' ')
+      return { dot: PURPLE, text: `📥 Ingesting ${ctx ? ctx + ' ' : ''}data — ${trainQueue.toLocaleString()} bars remaining` }
+    }
+    // 3. Training mode armed, queue empty — waiting for the blast.
+    if (training) {
+      return { dot: AMBER, text: '🎓 Training mode armed — waiting for historical bars' }
+    }
+    // 4. Live — armed and bars flowing recently.
+    if (ing.armed && dataFlowing) {
+      const t = currentBar?.time ? hhmm(currentBar.time) : null
+      return { dot: GREEN, text: `📡 Live — watching ${inst || 'the market'} for signals${t ? ` · last bar ${t} ET` : ''}` }
+    }
+    // 5. Armed but no recent bars.
+    if (ing.armed) {
+      return { dot: AMBER, text: '📡 Armed — waiting for market data' }
+    }
+    // 6. Disarmed / idle.
+    return { dot: GRAY, text: '⏸ Idle — ingestion paused' }
+  }, [lstm, lstmDoneAt, now, training, trainQueue, ing, dataFlowing, currentBar, symbol])
+
   const pct = (v) => v == null ? '—' : `${Math.round(v * 100)}%`
   const num = (v) => (v ?? 0).toLocaleString()
 
@@ -252,6 +343,11 @@ export default function AfkStream() {
         flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden',
         display: 'flex', flexDirection: 'column', gap: 12,
       }}>
+        {/* Status narration — plain-English headline of current activity */}
+        <div style={{ flexShrink: 0 }}>
+          <StatusTicker dot={narration.dot} text={narration.text} />
+        </div>
+
         {/* Trade Signal — top (most actionable) */}
         <div style={{ flexShrink: 0 }}>
           <TradeSignalPanel compact />
@@ -292,7 +388,37 @@ export default function AfkStream() {
 
       <style>{`
         @keyframes lab-pulse { 0%,100%{opacity:1; transform:scale(1)} 50%{opacity:.45; transform:scale(.85)} }
+        @keyframes status-fade { from{opacity:0; transform:translateY(3px)} to{opacity:1; transform:translateY(0)} }
       `}</style>
+    </div>
+  )
+}
+
+// ── Status narration ticker ───────────────────────────────────────────────
+// Prominent single line, monospace, pulsing activity dot, brief fade on change
+// (the key={text} remounts the span so the animation re-runs). Sized larger than
+// the panel body so it reads at stream distance.
+function StatusTicker({ dot, text }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 13, fontFamily: MONO,
+      borderRadius: 14, padding: '13px 18px',
+      background: 'linear-gradient(160deg, #15171b 0%, #101216 100%)',
+      border: '1px solid #23262d', boxShadow: 'inset 0 1px 0 #ffffff08',
+    }}>
+      <span style={{
+        width: 11, height: 11, borderRadius: '50%', background: dot, flexShrink: 0,
+        boxShadow: `0 0 10px ${dot}`, animation: 'lab-pulse 1.6s ease-in-out infinite',
+      }} />
+      <span key={text} style={{
+        fontSize: 17, fontWeight: 600, letterSpacing: '0.01em', color: 'var(--text-primary)',
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        animation: 'status-fade 0.5s ease',
+      }}>{text}</span>
+      <span style={{
+        marginLeft: 'auto', fontSize: 9.5, color: 'var(--text-muted)',
+        letterSpacing: '0.14em', flexShrink: 0,
+      }}>LIVE ACTIVITY</span>
     </div>
   )
 }
