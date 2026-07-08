@@ -209,6 +209,7 @@ async def handle_client(
                     "close":     msg.close,
                     "volume":    msg.volume,
                     "bar_type":  msg.bar_type,
+                    "timeframe": msg.timeframe,
                 }
                 try:
                     await publish_tick(redis_client, user_id, tick)

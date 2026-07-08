@@ -34,8 +34,9 @@ export const getHistory            = (params) => api.get('/market/history',     
 export const getMarketStatus       = ()       => api.get('/market/status')
 export const getRecentBars         = (limit = 200) => api.get(`/market/bars?limit=${limit}`)
 export const getDataCoverage       = ()       => api.get('/market/coverage')
-export const getDataSummary        = ()       => api.get('/market/data-summary')
-export const getDataDays           = (month)  => api.get('/market/data-days', { params: { month } })
+export const getDataSummary        = (timeframe = '1min')         => api.get('/market/data-summary', { params: { timeframe } })
+export const getDataDays           = (month, timeframe = '1min')  => api.get('/market/data-days', { params: { month, timeframe } })
+export const getDataIntegrity      = (timeframe = '1min')         => api.get('/market/data-integrity', { params: { timeframe } })
 export const getPredictionsHistory = (params) => api.get('/predictions/history', { params })
 export const getLatestPredictions  = ()       => api.get('/predictions/latest')
 
@@ -51,6 +52,7 @@ export const trainLSTM     = () => api.post('/models/lstm/train')
 export const startTraining     = () => api.post('/training/start')
 export const stopTraining      = () => api.post('/training/stop')
 export const getTrainingStatus = () => api.get('/training/status')
+export const flushQueue        = () => api.post('/training/flush-queue')
 
 // System resources — real CPU/RAM for the AI Lab stream panel
 export const getSystemStats    = () => api.get('/system/stats')

@@ -56,8 +56,12 @@ async def count_available_bars(db_conn, user_id) -> int:
     Training-tagged bars still count — replayed history is legitimate data — but
     each timestamp counts once.
     """
+    # Scoped to the 1-min series only. Multi-timeframe (Phase 1) stores 5-min
+    # bars too, but the LSTM remains a 1-min model here — filtering keeps its
+    # data (and behavior) identical to before, with no other timeframe leaking in.
     row = await db_conn.fetchrow(
-        "SELECT COUNT(DISTINCT time) AS n FROM ticks WHERE user_id = $1 AND bar_type != 'tick'",
+        "SELECT COUNT(DISTINCT time) AS n FROM ticks "
+        "WHERE user_id = $1 AND bar_type != 'tick' AND timeframe = '1min'",
         _as_uuid(user_id),
     )
     return row["n"] if row else 0
@@ -82,10 +86,12 @@ async def build_training_data(db_conn, user_id):
     # is_training ASC makes it prefer the live row over a training copy when both
     # exist. Training-tagged bars are still included — the fix is dedup, not
     # exclusion. The result is strictly increasing in time with no duplicates.
+    # 1-min series only (see count_available_bars): the LSTM stays a 1-min model
+    # in Phase 1, so 5-min bars never enter its training set.
     rows = await db_conn.fetch(
         """SELECT DISTINCT ON (time) time, open, high, low, close, volume, bar_type
            FROM ticks
-           WHERE user_id = $1 AND bar_type != 'tick'
+           WHERE user_id = $1 AND bar_type != 'tick' AND timeframe = '1min'
            ORDER BY time ASC, is_training ASC""",
         _as_uuid(user_id),
     )

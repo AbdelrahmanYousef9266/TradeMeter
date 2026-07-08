@@ -257,15 +257,20 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             string timestamp = time.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-            // TOKEN|TIMESTAMP|SYMBOL|OPEN|HIGH|LOW|CLOSE|VOLUME|BAR_TYPE\n
+            // TOKEN|TIMESTAMP|SYMBOL|OPEN|HIGH|LOW|CLOSE|VOLUME|BAR_TYPE|TIMEFRAME\n
+            // TIMEFRAME (the chart's bar period, e.g. "1min"/"5min") names the
+            // independent series this message belongs to. It is sent on EVERY
+            // message — including "hist" and "tick" — so historical bars keep their
+            // period even though their BAR_TYPE is "hist".
             string message = string.Format(
-                "{0}|{1}|{2}|{3:F2}|{4:F2}|{5:F2}|{6:F2}|{7}|{8}\n",
+                "{0}|{1}|{2}|{3:F2}|{4:F2}|{5:F2}|{6:F2}|{7}|{8}|{9}\n",
                 ConnectionToken,
                 timestamp,
                 Instrument,
                 open, high, low, close,
                 volume,
-                barType);
+                barType,
+                GetTimeframeString());
 
             byte[] bytes = Encoding.UTF8.GetBytes(message);
 
@@ -317,9 +322,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             try
             {
+                // tf scopes the gap check to THIS chart's timeframe, so a 5-min
+                // chart gap-fills against 5-min coverage only, never 1-min.
                 string url = string.Format(
-                    "http://{0}:{1}/market/gaps?token={2}",
-                    TradeMeterHost, BackendHttpPort, Uri.EscapeDataString(ConnectionToken));
+                    "http://{0}:{1}/market/gaps?token={2}&tf={3}",
+                    TradeMeterHost, BackendHttpPort,
+                    Uri.EscapeDataString(ConnectionToken),
+                    Uri.EscapeDataString(GetTimeframeString()));
 
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
                 req.Method          = "GET";
@@ -575,6 +584,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                 case BarsPeriodType.Range:   return BarsPeriod.Value + "rng";
                 default:                     return BarsPeriod.BarsPeriodType.ToString().ToLower();
             }
+        }
+
+        // The timeframe (independent series) this chart feeds — the bar period,
+        // e.g. "1min" / "5min". Run one chart per timeframe (a 1-min chart AND a
+        // 5-min chart, each with this strategy enabled) to feed both series.
+        private string GetTimeframeString()
+        {
+            return GetBarTypeString();
         }
 
         // ── Parameters ─────────────────────────────────────────────────────────

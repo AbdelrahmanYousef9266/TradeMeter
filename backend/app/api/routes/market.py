@@ -14,7 +14,7 @@ import logging
 import re
 import time
 import uuid as _uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -37,12 +37,13 @@ async def get_history(
     from_ts: datetime,
     to_ts: datetime,
     limit: int = 500,
+    timeframe: str = "1min",
     user: User = Depends(get_current_user),
     conn=Depends(get_db),
 ) -> list[dict]:
     """
     Return OHLCV bar closes for *symbol* between *from_ts* and *to_ts*,
-    scoped to the authenticated user.
+    scoped to the authenticated user and the given *timeframe*.
     """
     if limit > 5000:
         raise HTTPException(400, "limit must be ≤ 5000")
@@ -55,9 +56,10 @@ async def get_history(
              AND  time   >= $3
              AND  time   <= $4
              AND  is_training = false
+             AND  timeframe = $6
            ORDER  BY time ASC
            LIMIT  $5""",
-        user.id, symbol, from_ts, to_ts, limit,
+        user.id, symbol, from_ts, to_ts, limit, timeframe,
     )
 
     return [
@@ -121,6 +123,7 @@ async def market_status(
 @router.get("/bars")
 async def recent_bars(
     limit: int = 200,
+    timeframe: str = "1min",
     user: User = Depends(get_current_user),
     conn=Depends(get_db),
 ) -> list[dict]:
@@ -133,9 +136,10 @@ async def recent_bars(
                WHERE  user_id = $1
                  AND  bar_type != 'tick'
                  AND  is_training = false
+                 AND  timeframe = $3
                ORDER  BY time DESC
                LIMIT  $2""",
-            user.id, limit,
+            user.id, limit, timeframe,
         )
     except Exception as exc:
         logger.warning("recent_bars: query failed for user %s: %s", user.id, exc)
@@ -159,12 +163,13 @@ async def recent_bars(
 
 @router.get("/coverage")
 async def data_coverage(
+    timeframe: str = "1min",
     user: User = Depends(get_current_user),
     conn=Depends(get_db),
 ) -> dict:
     """
     Per-day summary of collected bars for this user, plus LSTM training days.
-    Powers the settings data-coverage calendar.
+    Powers the settings data-coverage calendar. Scoped to *timeframe*.
     """
     # Bars per day (exclude ticks)
     try:
@@ -177,9 +182,10 @@ async def data_coverage(
                WHERE  user_id = $1
                  AND  bar_type != 'tick'
                  AND  is_training = false
+                 AND  timeframe = $2
                GROUP  BY date_trunc('day', time)::date
                ORDER  BY day ASC""",
-            user.id,
+            user.id, timeframe,
         )
     except Exception as exc:
         logger.warning("coverage: bars query failed for user %s: %s", user.id, exc)
@@ -245,17 +251,43 @@ _COMPLETE_DAY_BARS = 370
 _BYTES_PER_ROW = 100
 
 
+async def _timeframe_breakdown(conn, user_id) -> list[dict]:
+    """Per-timeframe bar counts across ALL timeframes (for the Data-tab selector)."""
+    try:
+        rows = await conn.fetch(
+            """SELECT timeframe,
+                      COUNT(DISTINCT time)                                    AS total_bars,
+                      COUNT(DISTINCT time) FILTER (WHERE is_training = false) AS live_bars,
+                      COUNT(DISTINCT time) FILTER (WHERE is_training = true)  AS training_bars,
+                      COUNT(DISTINCT date_trunc('day', time))                 AS days
+               FROM ticks
+               WHERE user_id = $1 AND bar_type != 'tick'
+               GROUP BY timeframe
+               ORDER BY timeframe ASC""",
+            user_id,
+        )
+    except Exception:
+        return []
+    return [
+        {"timeframe": r["timeframe"], "total_bars": r["total_bars"],
+         "live_bars": r["live_bars"], "training_bars": r["training_bars"], "days": r["days"]}
+        for r in rows
+    ]
+
+
 @router.get("/data-summary")
 async def data_summary(
+    timeframe: str = "1min",
     user: User = Depends(get_current_user),
     conn=Depends(get_db),
 ) -> dict:
     """
-    Whole-database inventory of this user's bar data (live + training).
-
-    Returns totals (distinct-timestamp and raw-row counts), the overall date
-    range, a per-month breakdown, the instrument, and a rough storage estimate.
+    Whole-database inventory of this user's bar data (live + training), scoped to
+    *timeframe*. Also returns `timeframes`: a per-timeframe breakdown across ALL
+    timeframes so the Data tab can show 1-min and 5-min coverage side by side.
     """
+    timeframes = await _timeframe_breakdown(conn, user.id)
+
     try:
         totals = await conn.fetchrow(
             """SELECT
@@ -266,8 +298,8 @@ async def data_summary(
                    MIN(time)                                                   AS min_time,
                    MAX(time)                                                   AS max_time
                FROM ticks
-               WHERE user_id = $1 AND bar_type != 'tick'""",
-            user.id,
+               WHERE user_id = $1 AND bar_type != 'tick' AND timeframe = $2""",
+            user.id, timeframe,
         )
     except Exception as exc:
         logger.warning("data_summary: totals query failed for user %s: %s", user.id, exc)
@@ -275,6 +307,8 @@ async def data_summary(
 
     if not totals or (totals["total_raw_rows"] or 0) == 0:
         return {
+            "timeframe":          timeframe,
+            "timeframes":         timeframes,
             "total_bars":         0,
             "total_raw_rows":     0,
             "live_bars":          0,
@@ -295,10 +329,10 @@ async def data_summary(
                    COUNT(DISTINCT time) FILTER (WHERE is_training = false)  AS live_bars,
                    COUNT(DISTINCT time) FILTER (WHERE is_training = true)   AS training_bars
                FROM ticks
-               WHERE user_id = $1 AND bar_type != 'tick'
+               WHERE user_id = $1 AND bar_type != 'tick' AND timeframe = $2
                GROUP BY date_trunc('month', time)
                ORDER BY date_trunc('month', time) ASC""",
-            user.id,
+            user.id, timeframe,
         )
     except Exception as exc:
         logger.warning("data_summary: months query failed for user %s: %s", user.id, exc)
@@ -309,9 +343,9 @@ async def data_summary(
     try:
         sym = await conn.fetchrow(
             """SELECT symbol FROM ticks
-               WHERE user_id = $1 AND bar_type != 'tick'
+               WHERE user_id = $1 AND bar_type != 'tick' AND timeframe = $2
                GROUP BY symbol ORDER BY COUNT(*) DESC LIMIT 1""",
-            user.id,
+            user.id, timeframe,
         )
         instrument = sym["symbol"] if sym else None
     except Exception:
@@ -319,6 +353,8 @@ async def data_summary(
 
     raw_rows = totals["total_raw_rows"] or 0
     return {
+        "timeframe":      timeframe,
+        "timeframes":     timeframes,
         "total_bars":     totals["total_bars"] or 0,
         "total_raw_rows": raw_rows,
         "live_bars":      totals["live_bars"] or 0,
@@ -346,13 +382,14 @@ async def data_summary(
 @router.get("/data-days")
 async def data_days(
     month: str,
+    timeframe: str = "1min",
     user: User = Depends(get_current_user),
     conn=Depends(get_db),
 ) -> dict:
     """
-    Per-day detail for one month (format YYYY-MM). Each day reports its distinct
-    bar count, first/last bar time, whether it is "complete" (>= 370 bars), and
-    whether the day is live-only, training-only, or mixed.
+    Per-day detail for one month (format YYYY-MM) of *timeframe*. Each day reports
+    its distinct bar count, first/last bar time, whether it is "complete"
+    (>= 370 bars), and whether the day is live-only, training-only, or mixed.
     """
     if not re.fullmatch(r"\d{4}-\d{2}", month or ""):
         raise HTTPException(400, "month must be in YYYY-MM format")
@@ -375,10 +412,11 @@ async def data_days(
                FROM ticks
                WHERE user_id = $1
                  AND bar_type != 'tick'
+                 AND timeframe = $4
                  AND time >= $2 AND time < $3
                GROUP BY date_trunc('day', time)::date
                ORDER BY day ASC""",
-            user.id, start, end,
+            user.id, start, end, timeframe,
         )
     except Exception as exc:
         logger.warning("data_days: query failed for user %s month %s: %s", user.id, month, exc)
@@ -400,6 +438,75 @@ async def data_days(
     return {
         "month":                  month,
         "days":                   days,
+        "complete_day_threshold": _COMPLETE_DAY_BARS,
+    }
+
+
+@router.get("/data-integrity")
+async def data_integrity(
+    timeframe: str = "1min",
+    user: User = Depends(get_current_user),
+    conn=Depends(get_db),
+) -> dict:
+    """
+    Health check on the stored bar data for *timeframe* so the user can verify a
+    big import landed cleanly: complete vs partial days, duplicate-timestamp count
+    (should be 0 after dedup), and weekday gaps (weekdays inside the date range
+    with zero bars). Live + training combined.
+
+    Duplicate detection is timeframe-scoped — a 1-min and a 5-min bar at the same
+    timestamp are DIFFERENT series and must NOT count as duplicates of each other.
+    """
+    try:
+        day_rows = await conn.fetch(
+            """SELECT date_trunc('day', time)::date AS day, COUNT(DISTINCT time) AS bars
+               FROM ticks
+               WHERE user_id = $1 AND bar_type != 'tick' AND timeframe = $2
+               GROUP BY date_trunc('day', time)::date
+               ORDER BY day ASC""",
+            user.id, timeframe,
+        )
+    except Exception as exc:
+        logger.warning("data_integrity: day query failed for user %s: %s", user.id, exc)
+        day_rows = []
+
+    try:
+        duplicate_timestamps = await conn.fetchval(
+            """SELECT COUNT(*) FROM (
+                   SELECT time FROM ticks
+                   WHERE user_id = $1 AND bar_type != 'tick' AND timeframe = $2
+                   GROUP BY time HAVING COUNT(*) > 1
+               ) dups""",
+            user.id, timeframe,
+        ) or 0
+    except Exception as exc:
+        logger.warning("data_integrity: dup query failed for user %s: %s", user.id, exc)
+        duplicate_timestamps = 0
+
+    days_with_bars = {r["day"] for r in day_rows}
+    total_days    = len(day_rows)
+    complete_days = sum(1 for r in day_rows if r["bars"] >= _COMPLETE_DAY_BARS)
+    partial_days  = total_days - complete_days
+
+    # Weekday gaps: any Mon–Fri inside [first, last] that has zero bars.
+    missing: list[str] = []
+    if day_rows:
+        cur, last = day_rows[0]["day"], day_rows[-1]["day"]
+        while cur <= last:
+            if cur.weekday() < 5 and cur not in days_with_bars:
+                missing.append(cur.isoformat())
+            cur += timedelta(days=1)
+
+    return {
+        "total_days":           total_days,
+        "complete_days":        complete_days,
+        "partial_days":         partial_days,
+        "duplicate_timestamps": int(duplicate_timestamps),
+        "missing_weekdays":     {"count": len(missing), "dates": missing[:60]},
+        "date_range": {
+            "min": day_rows[0]["day"].isoformat()  if day_rows else None,
+            "max": day_rows[-1]["day"].isoformat() if day_rows else None,
+        },
         "complete_day_threshold": _COMPLETE_DAY_BARS,
     }
 
@@ -436,13 +543,15 @@ def _gap_record_failure(ip: str) -> None:
 
 
 @router.get("/gaps", response_class=PlainTextResponse)
-async def data_gaps(request: Request, token: str = "") -> str:
+async def data_gaps(request: Request, token: str = "", tf: str = "1min") -> str:
     """
     NT-token-authenticated coverage summary for gap-fill imports (plain text).
 
-    Accepts the token as `?token=TM-xxx` or an `X-NT-Token` header. Returns one
-    line per day the user has bars for (live + training combined) plus a LAST
-    line with the newest bar time — all UTC. See the module note above for format.
+    Accepts the token as `?token=TM-xxx` or an `X-NT-Token` header, and the
+    timeframe as `?tf=1min` / `?tf=5min`. Returns one line per day the user has
+    bars for IN THAT TIMEFRAME (live + training combined) plus a LAST line with
+    the newest bar time — all UTC. A 5-min chart gap-fills against 5-min coverage
+    only, never 1-min. See the module note above for format.
     """
     ip = request.client.host if request.client else "unknown"
     if _gap_rate_limited(ip):
@@ -467,10 +576,10 @@ async def data_gaps(request: Request, token: str = "") -> str:
                           MIN(time)                     AS first_bar,
                           MAX(time)                     AS last_bar
                    FROM ticks
-                   WHERE user_id = $1 AND bar_type != 'tick'
+                   WHERE user_id = $1 AND bar_type != 'tick' AND timeframe = $2
                    GROUP BY date_trunc('day', time)::date
                    ORDER BY day ASC""",
-                _uuid.UUID(user_id),
+                _uuid.UUID(user_id), tf,
             )
     except Exception as exc:
         logger.warning("data_gaps: coverage query failed for user %s: %s", user_id, exc)

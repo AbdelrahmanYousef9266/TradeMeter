@@ -236,6 +236,7 @@ class MLPipeline:
         bar_time:     object,
         db_conn:      asyncpg.Connection,
         redis_client: aioredis.Redis,
+        fast_mode:    bool = False,
     ) -> list[LevelUpEvent]:
         """
         Two-layer learning:
@@ -245,6 +246,12 @@ class MLPipeline:
         2. Refinement (on trade close): P&L-based learning + bonus XP.
         3. Check CC evaluations every 100 bars (may promote Challenger).
         4. Persist levels and promotions.
+
+        fast_mode (bulk historical import): keep ALL the in-memory learning
+        (River learn_one, XP, trades, CC evaluation) but skip every per-bar side
+        effect — trade-row updates, promotion broadcast/persist, per-bar level
+        persistence, MLflow snapshot, and periodic weight save. The caller
+        persists levels + weights once per batch instead. db_conn may be None.
         """
         # ── 1. Update open trades ─────────────────────────────────────────
         closed_trades = self.trade_manager.update_all(
@@ -318,7 +325,8 @@ class MLPipeline:
                     self.level_ranks[trade.model_name] = event.new_rank
                     level_up_events.append(event)
 
-            await self._save_trade(db_conn, trade)
+            if not fast_mode:
+                await self._save_trade(db_conn, trade)
 
         # ── 3b. Challenger shadow-book refinement (silent) ─────────────────
         # The Challenger's own trades close here and feed ONLY the Challenger
@@ -342,7 +350,7 @@ class MLPipeline:
         # ── 4. Champion/Challenger evaluations ─────────────────────────────
         for name, cc in self.cc_models.items():
             promotion = cc.maybe_evaluate()
-            if promotion:
+            if promotion and not fast_mode:
                 try:
                     await redis_client.publish(
                         f"live:{self.user_id}",
@@ -360,14 +368,17 @@ class MLPipeline:
                     pass
                 await self._save_promotion(db_conn, promotion)
 
-        # ── 5. Persist levels ──────────────────────────────────────────────
-        await self._save_levels(db_conn)
-
         self.bar_count += 1
-        if self.bar_count % settings.model_snapshot_interval == 0:
-            await self._snapshot_mlflow()
-        if self.bar_count % settings.model_state_save_interval == 0:
-            await self.save_state(db_conn)
+
+        # ── 5. Persist levels ──────────────────────────────────────────────
+        # In fast (bulk-import) mode the caller persists levels + weights once
+        # per batch, so skip all per-bar persistence here.
+        if not fast_mode:
+            await self._save_levels(db_conn)
+            if self.bar_count % settings.model_snapshot_interval == 0:
+                await self._snapshot_mlflow()
+            if self.bar_count % settings.model_state_save_interval == 0:
+                await self.save_state(db_conn)
 
         return level_up_events
 

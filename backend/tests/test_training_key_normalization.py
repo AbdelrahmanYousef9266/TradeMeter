@@ -141,6 +141,6 @@ async def test_hist_bar_accepted_when_training_started_with_uuid_object():
     await _process_entry(_hist_fields(), pool, redis)
 
     assert len(pool.conn.ticks_written) == 1
-    assert pool.conn.ticks_written[0][-1] is True   # tagged is_training
+    assert pool.conn.ticks_written[0][-2] is True   # tagged is_training (timeframe is now last)
     # And the run counter advanced under the same canonical key.
     assert training_status(str(UID))["bars_ingested"] == 1

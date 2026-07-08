@@ -115,8 +115,10 @@ async def test_hist_bar_accepted_and_tagged_when_training_on():
 
     assert len(pool.conn.ticks_written) == 1
     args = pool.conn.ticks_written[0]
-    assert args[-2] == "hist"     # bar_type preserved
-    assert args[-1] is True       # tagged as training data
+    # INSERT args end (..., bar_type, is_training, timeframe).
+    assert args[-3] == "hist"     # bar_type preserved
+    assert args[-2] is True       # tagged as training data
+    assert args[-1] == "1min"     # default timeframe
 
 
 @pytest.mark.asyncio

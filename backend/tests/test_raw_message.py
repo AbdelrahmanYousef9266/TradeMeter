@@ -41,10 +41,23 @@ def test_rejects_malformed(bad):
         RawMessage.parse(bad)
 
 
-def test_extra_pipe_field_rejected():
-    # A 10th field must not be silently accepted.
+def test_tenth_field_is_timeframe():
+    # The optional 10th field is the timeframe (multi-timeframe support).
+    msg = RawMessage.parse(_VALID + "|5min")
+    assert msg.timeframe == "5min"
+    assert msg.bar_type == "1min"   # bar_type unchanged
+
+
+def test_missing_timeframe_defaults_to_1min():
+    # Backward compat: a 9-field message (older strategy) defaults to 1min.
+    msg = RawMessage.parse(_VALID)
+    assert msg.timeframe == "1min"
+
+
+def test_eleventh_pipe_field_rejected():
+    # 9 or 10 fields are valid; an 11th must not be silently accepted.
     with pytest.raises(ValueError):
-        RawMessage.parse(_VALID + "|extra")
+        RawMessage.parse(_VALID + "|5min|extra")
 
 
 def test_whitespace_is_stripped():

@@ -42,12 +42,26 @@ async def upsert_user(conn, email: str, google_id: str) -> dict:
     return dict(row)
 
 
+def _is_comment_only(stmt: str) -> bool:
+    """True if a split chunk has no executable SQL (only -- comments / blanks).
+
+    A `;` inside a comment can split the file into a comment-only chunk, and
+    asyncpg's execute() of a bare comment raises AttributeError (not a
+    PostgresError), which would crash startup. We skip such chunks defensively.
+    """
+    for line in stmt.splitlines():
+        s = line.strip()
+        if s and not s.startswith("--"):
+            return False
+    return True
+
+
 async def _run_migration(pool: asyncpg.Pool, sql_path: str) -> None:
     """Execute a single migration file, one statement per connection."""
     with open(sql_path, encoding="utf-8") as fh:
         sql = fh.read()
 
-    statements = [s.strip() for s in sql.split(";") if s.strip()]
+    statements = [s.strip() for s in sql.split(";") if s.strip() and not _is_comment_only(s)]
     for stmt in statements:
         async with pool.acquire() as conn:
             try:

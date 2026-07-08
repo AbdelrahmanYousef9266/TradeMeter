@@ -60,9 +60,9 @@ def _clear_watermarks():
 @pytest.mark.asyncio
 async def test_first_bar_accepted_for_new_user():
     pool = _FakePool(max_time=None)
-    assert await _accept_bar(USER, T0, pool) is True
+    assert await _accept_bar(USER, "1min", T0, pool) is True
     # Same timestamp again → duplicate → skipped
-    assert await _accept_bar(USER, T0, pool) is False
+    assert await _accept_bar(USER, "1min", T0, pool) is False
 
 
 # ── 2. Strictly newer bars are accepted; equal/older are skipped ─────────────
@@ -70,11 +70,11 @@ async def test_first_bar_accepted_for_new_user():
 @pytest.mark.asyncio
 async def test_monotonic_acceptance():
     pool = _FakePool(max_time=None)
-    assert await _accept_bar(USER, T0, pool) is True
-    assert await _accept_bar(USER, T0 + timedelta(minutes=1), pool) is True   # newer
-    assert await _accept_bar(USER, T0 + timedelta(minutes=1), pool) is False  # duplicate
-    assert await _accept_bar(USER, T0, pool) is False                          # out of order
-    assert await _accept_bar(USER, T0 + timedelta(minutes=2), pool) is True   # newer again
+    assert await _accept_bar(USER, "1min", T0, pool) is True
+    assert await _accept_bar(USER, "1min", T0 + timedelta(minutes=1), pool) is True   # newer
+    assert await _accept_bar(USER, "1min", T0 + timedelta(minutes=1), pool) is False  # duplicate
+    assert await _accept_bar(USER, "1min", T0, pool) is False                          # out of order
+    assert await _accept_bar(USER, "1min", T0 + timedelta(minutes=2), pool) is True   # newer again
 
 
 # ── 3. Watermark seeded from DB survives a "restart" ─────────────────────────
@@ -86,10 +86,10 @@ async def test_watermark_seeded_from_db_blocks_replay():
     pool = _FakePool(max_time=seeded)
 
     # A redelivered bar at or before the seeded watermark is skipped
-    assert await _accept_bar(USER, T0 + timedelta(minutes=3), pool) is False
-    assert await _accept_bar(USER, seeded, pool) is False
+    assert await _accept_bar(USER, "1min", T0 + timedelta(minutes=3), pool) is False
+    assert await _accept_bar(USER, "1min", seeded, pool) is False
     # Only a genuinely newer bar gets through
-    assert await _accept_bar(USER, seeded + timedelta(minutes=1), pool) is True
+    assert await _accept_bar(USER, "1min", seeded + timedelta(minutes=1), pool) is True
 
 
 # ── 4. Seed query failure is non-fatal — falls back to accept-all ────────────
@@ -101,6 +101,6 @@ async def test_seed_failure_is_non_fatal():
             raise RuntimeError("pool down")
 
     # Should not raise; with no watermark it accepts the first bar
-    assert await _accept_bar(USER, T0, _BrokenPool()) is True
+    assert await _accept_bar(USER, "1min", T0, _BrokenPool()) is True
     # And still dedups within the run afterwards
-    assert await _accept_bar(USER, T0, _BrokenPool()) is False
+    assert await _accept_bar(USER, "1min", T0, _BrokenPool()) is False

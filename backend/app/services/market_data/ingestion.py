@@ -44,6 +44,12 @@ _STREAM_KEY    = "market:raw"
 _GROUP_NAME    = "ingestion"     # consumer group — survives consumer restarts
 _CONSUMER_NAME = "worker-1"      # stable name so a restart reclaims its pending entries
 
+# The timeframe the ML models currently consume. Phase 1 stores EVERY timeframe
+# but only runs features/learning/prediction on this one, so the models remain
+# exactly 1-min (unchanged) while 5-min bars accumulate in storage for a later
+# phase to wire up. Nothing in models/features/LSTM changes here.
+LIVE_ML_TIMEFRAME = "1min"
+
 # Per-user state: prev_features, prev_predictions, prev_close
 # {user_id: {"features": dict, "predictions": dict, "close": float}}
 _bar_state: dict[str, dict] = {}
@@ -52,6 +58,12 @@ _bar_state: dict[str, dict] = {}
 # Seeded from the ticks table (live rows only) on first access so it survives
 # restarts. {user_id: datetime | None}
 _last_bar_time: dict[str, object] = {}
+
+# Fast-import weight-save throttle: pickling all models is the batch's dominant
+# cost, so only persist learned weights every N imported bars (plus a final save
+# when the queue drains). Levels persist every batch (cheap). {user_id: bars}
+_hist_save_accum: dict[str, int] = {}
+_HIST_STATE_SAVE_EVERY = 5000
 
 
 # ── Training mode (per-user) ─────────────────────────────────────────────────
@@ -143,53 +155,182 @@ def _warn_hist_rejected(user_id: str) -> None:
         )
 
 
-# ── Idempotency / monotonic-order guard ──────────────────────────────────────
+# ── Queue depth + flush ──────────────────────────────────────────────────────
+#
+# The 'market:raw' stream and its consumer group are SHARED across users (this is
+# a 1-2 user deployment, so that is acceptable). queue_pending reports the whole
+# stream's depth; flush_queue discards the whole backlog. Per-user in-memory
+# state (the deferred-trade buffer) is cleared only for the requesting user.
 
-async def _accept_bar(user_id: str, tick_time, db_pool: asyncpg.Pool) -> bool:
+async def get_queue_pending(redis_client: aioredis.Redis) -> int:
+    """Approximate number of bars still queued in the ingestion stream."""
+    try:
+        return int(await redis_client.xlen(_STREAM_KEY))
+    except Exception:
+        return 0
+
+
+async def _clear_group_pending(redis_client: aioredis.Redis) -> None:
     """
-    Decide whether this bar close should be processed.
-
-    Returns False (skip) when the bar is a duplicate or arrives out of order —
-    i.e. its timestamp is not strictly newer than the last one we processed.
-    This makes processing idempotent: a consumer-group redelivery (the
-    at-least-once side effect of #2) reprocesses the same entry, but the
-    durable effects (ticks/predictions rows, model learning) are applied once.
-
-    The high-water mark is seeded once per user from MAX(time) in the ticks
-    table, so it holds across a restart even though it lives in memory.
+    Best-effort: ACK any entries still in the consumer group's pending list so a
+    just-trimmed backlog isn't re-read. Version-tolerant across redis-py releases.
     """
-    if user_id not in _last_bar_time:
+    try:
+        pend = await redis_client.xpending(_STREAM_KEY, _GROUP_NAME)
+    except Exception:
+        return
+    total = 0
+    if isinstance(pend, dict):
+        total = pend.get("pending", 0) or 0
+    elif isinstance(pend, (list, tuple)) and pend:
+        total = pend[0] or 0
+    if not total:
+        return
+    try:
+        detail = await redis_client.xpending_range(
+            _STREAM_KEY, _GROUP_NAME, min="-", max="+", count=10000
+        )
+        for item in detail or []:
+            entry_id = item["message_id"] if isinstance(item, dict) else item[0]
+            try:
+                await redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+async def flush_queue(user_id: str, redis_client: aioredis.Redis) -> int:
+    """
+    Discard everything queued in 'market:raw' and clear the user's deferred
+    state so no orphaned trade fires from a half-processed import.
+
+    Returns the number of stream entries dropped. Anything discarded is
+    re-importable via the strategy's gap-fill, so this is safe to call.
+    """
+    dropped = await get_queue_pending(redis_client)
+    try:
+        await redis_client.xtrim(_STREAM_KEY, maxlen=0, approximate=False)
+    except Exception as exc:
+        logger.warning("flush_queue: XTRIM failed: %s", exc)
+    await _clear_group_pending(redis_client)
+
+    # Drop the per-user deferred learning state and any buffered (not-yet-filled)
+    # trade signals so nothing fires against bars that were just discarded.
+    uid = str(user_id)
+    _bar_state.pop(uid, None)
+    try:
+        from app.services.ml.pipeline import _pipelines
+        pl = _pipelines.get(uid)
+        if pl is not None:
+            pl._pending_champion = []
+            pl._pending_challenger = []
+    except Exception:
+        pass
+
+    logger.info("flush_queue: dropped %d queued entr%s for user %s",
+                dropped, "y" if dropped == 1 else "ies", uid)
+    return dropped
+
+
+# ── Idempotency / monotonic-order guard (per timeframe) ──────────────────────
+
+def _wm_key(user_id: str, timeframe: str) -> tuple[str, str]:
+    """Watermark key — one high-water mark per (user, timeframe) series."""
+    return (user_id, timeframe)
+
+
+async def _accept_bar(user_id: str, timeframe: str, tick_time, db_pool: asyncpg.Pool) -> bool:
+    """
+    Decide whether this bar close should be processed. The high-water mark is
+    per (user_id, timeframe): a 1-min and a 5-min series each have their own
+    watermark, so a 5-min bar never dedups against a 1-min bar at the same time.
+
+    Returns False (skip) when the bar is a duplicate or arrives out of order for
+    ITS timeframe — i.e. its timestamp is not strictly newer than the last one we
+    processed for that timeframe. Seeded once from MAX(time) for the (user,
+    timeframe) live rows so it holds across a restart.
+    """
+    key = _wm_key(user_id, timeframe)
+    if key not in _last_bar_time:
         watermark = None
         try:
             async with db_pool.acquire() as conn:
                 watermark = await conn.fetchval(
-                    "SELECT MAX(time) FROM ticks WHERE user_id = $1 AND is_training = false",
-                    _uuid.UUID(user_id),
+                    "SELECT MAX(time) FROM ticks "
+                    "WHERE user_id = $1 AND timeframe = $2 AND is_training = false",
+                    _uuid.UUID(user_id), timeframe,
                 )
         except Exception as exc:
-            logger.warning("Ingestion: watermark seed failed for %s: %s", user_id, exc)
-        _last_bar_time[user_id] = watermark
+            logger.warning("Ingestion: watermark seed failed for %s/%s: %s", user_id, timeframe, exc)
+        _last_bar_time[key] = watermark
 
-    last = _last_bar_time[user_id]
+    last = _last_bar_time[key]
     if last is not None and tick_time <= last:
         return False
 
-    _last_bar_time[user_id] = tick_time
+    _last_bar_time[key] = tick_time
     return True
 
 
+# ── Parsing ─────────────────────────────────────────────────────────────────
+
+def _parse_tick(fields: dict) -> Tick:
+    """Build a Tick from a raw Redis-stream entry. Raises KeyError/ValueError."""
+    return Tick(
+        time=datetime.fromisoformat(fields["timestamp"]),
+        user_id=_uuid.UUID(fields["user_id"]),
+        symbol=fields["symbol"],
+        open=float(fields["open"]),
+        high=float(fields["high"]),
+        low=float(fields["low"]),
+        close=float(fields["close"]),
+        volume=int(fields["volume"]),
+        bar_type=fields["bar_type"],
+        timeframe=fields.get("timeframe", "1min"),
+    )
+
+
 # ── DB write helpers ────────────────────────────────────────────────────────
+
+_TICK_COLUMNS = ["time", "user_id", "symbol", "open", "high", "low",
+                 "close", "volume", "bar_type", "is_training", "timeframe"]
+
 
 async def write_tick_to_db(
     conn: asyncpg.Connection, tick: Tick, is_training: bool = False
 ) -> None:
     await conn.execute(
-        """INSERT INTO ticks (time, user_id, symbol, open, high, low, close, volume, bar_type, is_training)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
+        """INSERT INTO ticks (time, user_id, symbol, open, high, low, close, volume, bar_type, is_training, timeframe)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)""",
         tick.time, tick.user_id, tick.symbol,
         tick.open, tick.high, tick.low, tick.close,
-        tick.volume, tick.bar_type, is_training,
+        tick.volume, tick.bar_type, is_training, tick.timeframe,
     )
+
+
+async def _copy_ticks_to_db(
+    db_pool: asyncpg.Pool, ticks: list[Tick], is_training: bool
+) -> int:
+    """
+    Bulk-insert many bars in ONE round trip via COPY (asyncpg
+    copy_records_to_table) instead of one INSERT per bar. This is the single
+    biggest speedup for large historical imports — ~100k rows land in a couple
+    of batched COPYs instead of 100k separate INSERTs. Returns rows written.
+
+    Each row carries its own timeframe, so a mixed 1-min/5-min batch stores each
+    bar in its own series (no collision even at a shared timestamp).
+    """
+    if not ticks:
+        return 0
+    records = [
+        (t.time, t.user_id, t.symbol, t.open, t.high, t.low,
+         t.close, t.volume, t.bar_type, is_training, t.timeframe)
+        for t in ticks
+    ]
+    async with db_pool.acquire() as conn:
+        await conn.copy_records_to_table("ticks", records=records, columns=_TICK_COLUMNS)
+    return len(records)
 
 
 async def _store_predictions(
@@ -227,17 +368,7 @@ async def _process_entry(
 ) -> None:
     # ── 1. Parse ─────────────────────────────────────────────────────────
     try:
-        tick = Tick(
-            time=datetime.fromisoformat(fields["timestamp"]),
-            user_id=_uuid.UUID(fields["user_id"]),
-            symbol=fields["symbol"],
-            open=float(fields["open"]),
-            high=float(fields["high"]),
-            low=float(fields["low"]),
-            close=float(fields["close"]),
-            volume=int(fields["volume"]),
-            bar_type=fields["bar_type"],
-        )
+        tick = _parse_tick(fields)
     except (KeyError, ValueError) as exc:
         logger.warning("Ingestion: bad stream entry: %s | %s", exc, fields)
         return
@@ -275,10 +406,10 @@ async def _process_entry(
     # here (it advances the live watermark) so live forward data resumes cleanly
     # once training stops.
     if not training:
-        if not await _accept_bar(user_id, tick.time, db_pool):
+        if not await _accept_bar(user_id, tick.timeframe, tick.time, db_pool):
             logger.debug(
-                "Ingestion: skipping duplicate/stale bar %s for user %s",
-                tick.time, user_id,
+                "Ingestion: skipping duplicate/stale %s bar %s for user %s",
+                tick.timeframe, tick.time, user_id,
             )
             return
     else:
@@ -300,6 +431,14 @@ async def _process_entry(
     except asyncpg.PostgresError as exc:
         # Non-fatal — ML pipeline and WebSocket publish still run
         logger.error("Ingestion: DB write failed (continuing to ML): %s", exc)
+
+    # ── 3b. TIMEFRAME → ML GATE ───────────────────────────────────────────
+    # Every timeframe is STORED above, but only the ML timeframe (1min) is fed
+    # to features / learning / prediction. Other timeframes (e.g. 5min) are
+    # persisted for the Data layer and a later phase; the models stay 1-min-only
+    # here so their feature-engine state is never corrupted by another series.
+    if tick.timeframe != LIVE_ML_TIMEFRAME:
+        return
 
     # ── 4. Compute features ───────────────────────────────────────────────
     engine = get_engine(user_id)
@@ -475,6 +614,13 @@ async def _ensure_group(redis_client: aioredis.Redis) -> None:
             raise
 
 
+async def _ack(redis_client: aioredis.Redis, entry_id: str) -> None:
+    try:
+        await redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+    except Exception as exc:
+        logger.error("Ingestion: xack failed for %s: %s", entry_id, exc)
+
+
 async def _handle_entry(
     entry_id: str,
     fields: dict,
@@ -490,10 +636,156 @@ async def _handle_entry(
             entry_id, exc,
         )
     finally:
+        await _ack(redis_client, entry_id)
+
+
+# ── Fast bulk-import path (historical bars in training mode) ─────────────────
+#
+# Historical "hist" bars during training mode are the ONLY case that arrives in
+# huge bursts (a year ≈ 98k bars). The per-bar live path (one INSERT for the
+# bar + ~10 prediction INSERTs + a per-bar level upsert + a full WebSocket bar
+# payload) makes that take hours. This batched path instead:
+#   • COPYs all the bars in one round trip,
+#   • runs the SAME in-memory ML learning (River learn_one, XP, simulated trades)
+#     but WITHOUT per-bar prediction storage or a per-bar WS broadcast,
+#   • persists levels + weights once per batch, and
+#   • emits ONE throttled "training_progress" event per batch for the UI.
+
+async def _process_hist_batch(
+    batch: list,                      # list[(entry_id, Tick)] — all hist + training-on
+    db_pool: asyncpg.Pool,
+    redis_client: aioredis.Redis,
+) -> None:
+    by_user: dict[str, list] = {}
+    for _entry_id, tick in batch:
+        by_user.setdefault(str(tick.user_id), []).append(tick)
+
+    for user_id, ticks in by_user.items():
+        # 1. Bulk-store EVERY bar of EVERY timeframe (including warmup bars) in
+        #    one COPY — each row carries its own timeframe, so a mixed batch stays
+        #    isolated per series.
         try:
-            await redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+            await _copy_ticks_to_db(db_pool, ticks, is_training=True)
         except Exception as exc:
-            logger.error("Ingestion: xack failed for %s: %s", entry_id, exc)
+            logger.error("Ingestion(fast): COPY failed for %s (%d bars): %s", user_id, len(ticks), exc)
+
+        # 2. Advance the training run counters for every imported bar.
+        for tick in ticks:
+            _note_training_bar(user_id, tick.time)
+
+        # 3. In-memory learning — ONLY the ML timeframe (1min). Other timeframes
+        #    are stored above but not learned yet (models stay 1-min-only).
+        ml_ticks = [t for t in ticks if t.timeframe == LIVE_ML_TIMEFRAME]
+        if not ml_ticks:
+            await _publish_training_progress(user_id, redis_client)
+            continue
+
+        engine = get_engine(user_id)
+        try:
+            async with db_pool.acquire() as conn:
+                pipeline = await get_pipeline(user_id, conn)
+        except Exception as exc:
+            logger.error("Ingestion(fast): get_pipeline failed for %s: %s", user_id, exc)
+            continue
+
+        for tick in ml_ticks:
+            try:
+                features = engine.update(tick)
+            except Exception:
+                continue
+            if features is None:
+                continue   # warmup
+            prev = _bar_state.get(user_id)
+            if prev and prev.get("predictions"):
+                try:
+                    await pipeline.learn_all(
+                        features=prev["features"], actual_close=tick.close,
+                        prev_close=prev["close"], predictions=prev["predictions"],
+                        bar_high=tick.high, bar_low=tick.low, bar_time=tick.time,
+                        db_conn=None, redis_client=redis_client, fast_mode=True,
+                    )
+                except Exception as exc:
+                    logger.error("Ingestion(fast): learn_all failed for %s: %s", user_id, exc)
+            try:
+                predictions = await pipeline.predict_all(
+                    features, tick.close, current_bar_open=tick.open, bar_time=tick.time,
+                )
+                _bar_state[user_id] = {
+                    "features": features, "predictions": predictions, "close": tick.close,
+                }
+            except Exception as exc:
+                logger.error("Ingestion(fast): predict_all failed for %s: %s", user_id, exc)
+
+        # 4. Persist the level ladder every batch (cheap). Weights are pickled +
+        #    written far less often — pickling all models is the batch's main cost
+        #    — every _HIST_STATE_SAVE_EVERY bars, plus a final save when the queue
+        #    drains (import finished) so the last partial chunk isn't lost.
+        try:
+            async with db_pool.acquire() as conn:
+                await pipeline._save_levels(conn)
+        except Exception as exc:
+            logger.warning("Ingestion(fast): level persist failed for %s: %s", user_id, exc)
+
+        pending = await get_queue_pending(redis_client)
+        _hist_save_accum[user_id] = _hist_save_accum.get(user_id, 0) + len(ticks)
+        if _hist_save_accum[user_id] >= _HIST_STATE_SAVE_EVERY or pending == 0:
+            try:
+                async with db_pool.acquire() as conn:
+                    await pipeline.save_state(conn)
+                _hist_save_accum[user_id] = 0
+            except Exception as exc:
+                logger.warning("Ingestion(fast): weight persist failed for %s: %s", user_id, exc)
+
+        # 5. One throttled progress event (replaces the per-bar WS broadcast).
+        await _publish_training_progress(user_id, redis_client, pending)
+
+
+async def _publish_training_progress(user_id, redis_client, pending=None) -> None:
+    """One throttled progress event per batch (not one WS bar per bar)."""
+    try:
+        if pending is None:
+            pending = await get_queue_pending(redis_client)
+        await redis_client.publish(f"live:{user_id}", json.dumps({
+            "type":          "training_progress",
+            "processed":     _training_bar_count.get(user_id, 0),
+            "queue_pending": pending,
+        }))
+    except Exception:
+        pass
+
+
+async def _route_entries(
+    entries: list,
+    db_pool: asyncpg.Pool,
+    redis_client: aioredis.Redis,
+) -> None:
+    """
+    Split a delivered batch: hist bars whose user is in training mode go to the
+    fast COPY+learn path; everything else takes the normal per-entry path.
+    """
+    fast_batch: list = []
+    for entry_id, fields in entries:
+        bar_type = (fields.get("bar_type") or "").lower()
+        uid      = fields.get("user_id")
+        if bar_type == "hist" and uid and is_training_mode(uid):
+            try:
+                tick = _parse_tick(fields)
+            except (KeyError, ValueError) as exc:
+                logger.warning("Ingestion: bad hist entry: %s | %s", exc, fields)
+                await _ack(redis_client, entry_id)
+                continue
+            fast_batch.append((entry_id, tick))
+        else:
+            await _handle_entry(entry_id, fields, db_pool, redis_client)
+
+    if fast_batch:
+        try:
+            await _process_hist_batch(fast_batch, db_pool, redis_client)
+        except Exception as exc:
+            logger.error("Ingestion: fast batch failed (%d bars): %s", len(fast_batch), exc)
+        finally:
+            for entry_id, _tick in fast_batch:
+                await _ack(redis_client, entry_id)
 
 
 async def _drain_pending(
@@ -563,8 +855,9 @@ async def consume_stream(
                 continue
 
             for _stream_name, entries in result:
-                for entry_id, fields in entries:
-                    await _handle_entry(entry_id, fields, db_pool, redis_client)
+                # Route the whole batch at once so consecutive historical bars can
+                # be COPY'd + learned together (the fast bulk-import path).
+                await _route_entries(entries, db_pool, redis_client)
 
         except asyncio.CancelledError:
             logger.info("Ingestion consumer cancelled")

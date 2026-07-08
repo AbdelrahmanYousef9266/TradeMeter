@@ -100,6 +100,25 @@ TradeMeter: gap check — 21 days already complete, skipping those; sending miss
 TradeMeter: historical transmission complete — 480 bars sent (9074 skipped as already present)
 ```
 
+### Importing a continuous (back-adjusted) contract
+
+To import a long span (e.g. a year of MES) you'll load a **continuous** series
+(`MES ##-##`, *Merge Policy = Merge Back Adjusted*) that stitches multiple
+quarterly contracts together. That's fully supported:
+
+- The `Instrument` symbol is stored verbatim and may vary across the span — nothing
+  keys on the symbol. **De-duplication and coverage are by timestamp only**, and
+  the Data tab / gap-fill group by time regardless of symbol.
+- **Use ONE consistent merge policy for the whole history.** Do not mix
+  back-adjusted and non-adjusted bars in the same import — back-adjustment shifts
+  historical prices, so mixing the two produces discontinuities in the price series
+  the models learn from. If you switch policy, do a clean-slate reset first
+  (`--include-bars`) and re-import.
+
+Large imports are fast: the backend uses a batched COPY + throttled-broadcast path
+for historical bars, so ~98k one-minute RTH bars (a year) import in a few minutes.
+The training banner shows `Processing N / M` so you can watch it drain.
+
 ---
 
 ## TCP Message Format
@@ -107,25 +126,45 @@ TradeMeter: historical transmission complete — 480 bars sent (9074 skipped as 
 Every message is a single UTF-8 string terminated with `\n`:
 
 ```
-TOKEN|TIMESTAMP|SYMBOL|OPEN|HIGH|LOW|CLOSE|VOLUME|BAR_TYPE\n
+TOKEN|TIMESTAMP|SYMBOL|OPEN|HIGH|LOW|CLOSE|VOLUME|BAR_TYPE|TIMEFRAME\n
 ```
 
-Example (bar close):
+`TIMEFRAME` (the 10th field) is the chart's bar period — `1min`, `5min`, … — and
+names the **independent series** the bar belongs to. It is sent on every message,
+including `hist` and `tick`, so historical bars keep their period even though their
+`BAR_TYPE` is `hist`. It is **optional** for backward compatibility: a 9-field
+message from an older strategy defaults to `1min`.
+
+Example (bar close, 1-min chart):
 ```
-TM-a3f9x2|2025-03-15T14:32:00Z|MES 03-25|5841.25|5844.00|5840.50|5843.00|980|1min
+TM-a3f9x2|2025-03-15T14:32:00Z|MES 03-25|5841.25|5844.00|5840.50|5843.00|980|1min|1min
+```
+
+Example (bulk-imported historical bar from a 5-min chart — `BAR_TYPE=hist`, `TIMEFRAME=5min`):
+```
+TM-a3f9x2|2025-01-20T14:30:00Z|MES 03-25|5841.25|5847.00|5839.50|5845.00|4200|hist|5min
 ```
 
 Example (tick update):
 ```
-TM-a3f9x2|2025-03-15T14:32:04Z|MES 03-25|5841.25|5844.00|5840.50|5842.75|1043|tick
-```
-
-Example (bulk-imported historical bar — only when `SendHistorical = true`):
-```
-TM-a3f9x2|2025-01-20T14:32:00Z|MES 03-25|5841.25|5844.00|5840.50|5843.00|980|hist
+TM-a3f9x2|2025-03-15T14:32:04Z|MES 03-25|5841.25|5844.00|5840.50|5842.75|1043|tick|1min
 ```
 
 Bar-close messages are sent once per bar (triggered by the first tick of the next bar). Tick messages are sent on every `MarketDataType.Last` event between bar closes. `hist` messages are sent once per historical bar during the initial chart load and require Training Mode to be ON (see "Bulk-importing chart history" above).
+
+### Feeding multiple timeframes
+
+Each timeframe is an independent series in TradeMeter — a 1-min and a 5-min bar at
+the same timestamp are different rows and never dedup against each other. To feed
+both, **run one chart per timeframe**, each with the strategy enabled:
+
+- Open a **1-minute** chart of your instrument, enable TradeMeterFeed → feeds the `1min` series.
+- Open a **5-minute** chart of the same instrument, enable a second TradeMeterFeed → feeds the `5min` series.
+
+Everything is per-timeframe: gap-fill for the 5-min chart checks 5-min coverage
+only, and the dashboard **Data** tab has a `1min`/`5min` toggle. (Phase 1 stores
+both series; the models still learn from `1min` only — multi-timeframe modelling
+is a later phase.)
 
 ---
 

@@ -43,8 +43,14 @@ async def publish_tick(client: aioredis.Redis, user_id: str, tick: dict) -> None
         "close":     str(tick["close"]),
         "volume":    str(tick["volume"]),
         "bar_type":  tick["bar_type"],
+        "timeframe": tick.get("timeframe", "1min"),
     }
-    await client.xadd("market:raw", entry, maxlen=10_000, approximate=True)
+    # Cap the stream so it can't grow without bound, but keep it high enough that
+    # a large historical import (up to ~350k bars) can buffer without the oldest
+    # UNDELIVERED bars being trimmed away before the consumer drains them. At
+    # ~200 bytes/entry this is ~60 MB worst case, and only transiently during an
+    # import (the fast bulk path drains it quickly).
+    await client.xadd("market:raw", entry, maxlen=300_000, approximate=True)
 
     # Only forward real-time tick updates directly to pub/sub.
     # Bar-close messages are published by the ingestion pipeline after ML enrichment.

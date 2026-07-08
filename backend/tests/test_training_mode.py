@@ -132,8 +132,10 @@ async def test_stale_bar_accepted_when_training_on():
 
     # Accepted despite being older than the watermark.
     assert len(pool.conn.ticks_written) == 1
-    # …and tagged as training data (is_training is the last INSERT arg).
-    assert pool.conn.ticks_written[0][-1] is True
+    # …and tagged as training data. INSERT args end (..., bar_type, is_training,
+    # timeframe), so is_training is the second-to-last arg.
+    assert pool.conn.ticks_written[0][-2] is True
+    assert pool.conn.ticks_written[0][-1] == "1min"   # default timeframe
     # The live watermark is NOT advanced/regressed by training bars.
     assert ingestion._last_bar_time[USER] == T_LATER
     # This-run counters advanced.

@@ -15,12 +15,15 @@ learn from the replayed bars — that is the whole point.
 
 from fastapi import APIRouter, Depends
 
+from app.core.redis import get_redis
 from app.core.security import get_current_user
 from app.models.user import User
 from app.services.market_data.ingestion import (
     start_training,
     stop_training,
     training_status,
+    flush_queue,
+    get_queue_pending,
 )
 
 router = APIRouter()
@@ -39,6 +42,23 @@ async def stop(user: User = Depends(get_current_user)) -> dict:
 
 
 @router.get("/status")
-async def status(user: User = Depends(get_current_user)) -> dict:
-    """Return whether training mode is on and how many bars/sessions this run."""
-    return training_status(str(user.id))
+async def status(user: User = Depends(get_current_user), redis=Depends(get_redis)) -> dict:
+    """
+    Training mode flag + this-run counters, plus queue_pending: how many bars are
+    still queued in the shared ingestion stream (drives the progress indicator).
+    """
+    st = training_status(str(user.id))
+    st["queue_pending"] = await get_queue_pending(redis)
+    return st
+
+
+@router.post("/flush-queue")
+async def flush(user: User = Depends(get_current_user), redis=Depends(get_redis)) -> dict:
+    """
+    Discard everything queued in the ingestion stream and clear the user's
+    deferred trade state. Safe: dropped bars are re-importable via gap-fill.
+    NOTE: the stream is shared, so this flushes the queue for the whole backend
+    (acceptable for this 1–2 user deployment).
+    """
+    dropped = await flush_queue(str(user.id), redis)
+    return {"flushed": dropped}

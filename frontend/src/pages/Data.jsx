@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { getDataSummary, getDataDays } from '../services/api'
+import { getDataSummary, getDataDays, getDataIntegrity } from '../services/api'
 
 // Completeness thresholds (bars/day). A near-full RTH session is ~390 1-min bars;
 // the backend calls a day "complete" at >= 370. We reuse the same buckets here.
@@ -69,33 +69,47 @@ function buildMonthWeeks(ym, daysMap) {
 }
 
 export default function Data() {
+  const [timeframe, setTimeframe] = useState('1min')
   const [summary, setSummary]   = useState(null)
   const [loading, setLoading]   = useState(true)
+  const [integrity, setIntegrity] = useState(null)
   const [expanded, setExpanded] = useState(null)          // month string or null
   const [daysByMonth, setDaysByMonth] = useState({})      // { 'YYYY-MM': {days, ...} }
   const expandedRef = useRef(null)
   expandedRef.current = expanded
 
   const fetchDays = useCallback((month) => {
-    getDataDays(month)
+    getDataDays(month, timeframe)
       .then(res => setDaysByMonth(prev => ({ ...prev, [month]: res.data })))
       .catch(() => {})
-  }, [])
+  }, [timeframe])
 
   const refresh = useCallback(() => {
-    getDataSummary()
+    getDataSummary(timeframe)
       .then(res => { setSummary(res.data); setLoading(false) })
       .catch(() => setLoading(false))
+    getDataIntegrity(timeframe)
+      .then(res => setIntegrity(res.data))
+      .catch(() => {})
     // Keep the open month fresh during an active import.
     if (expandedRef.current) fetchDays(expandedRef.current)
-  }, [fetchDays])
+  }, [fetchDays, timeframe])
 
-  // Initial load + 30s auto-refresh (updates live during an import).
+  // Initial load + 30s auto-refresh; also re-runs when the timeframe changes.
   useEffect(() => {
     refresh()
     const id = setInterval(refresh, 30000)
     return () => clearInterval(id)
   }, [refresh])
+
+  // Switching timeframe shows a different independent series — drop cached day
+  // grids and collapse the open month so nothing bleeds across timeframes.
+  const selectTimeframe = (tf) => {
+    if (tf === timeframe) return
+    setDaysByMonth({})
+    setExpanded(null)
+    setTimeframe(tf)
+  }
 
   const toggleMonth = (month) => {
     if (expanded === month) { setExpanded(null); return }
@@ -125,15 +139,24 @@ export default function Data() {
     <div style={{ maxWidth: 860, margin: '0 auto', padding: '24px 16px' }}>
       {header}
 
+      <TimeframeToggle
+        timeframes={summary?.timeframes || []}
+        selected={timeframe}
+        onSelect={selectTimeframe}
+      />
+
       {!hasData ? (
         <div style={{ ...card, textAlign: 'center', padding: '40px 16px', color: 'var(--text-muted)' }}>
           <div style={{ fontSize: 28, marginBottom: 8 }}>📭</div>
-          <div style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 4 }}>No market data yet</div>
+          <div style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 4 }}>
+            No {timeframe} data yet
+          </div>
           <div style={{ fontSize: 12 }}>Connect NinjaTrader or run a training import to start collecting bars.</div>
         </div>
       ) : (
         <>
           <SummaryRow summary={summary} />
+          <DataHealth integrity={integrity} />
           <MonthsTable
             summary={summary}
             expanded={expanded}
@@ -143,6 +166,49 @@ export default function Data() {
           <Legend />
         </>
       )}
+    </div>
+  )
+}
+
+// ── Timeframe selector ──────────────────────────────────────────────────────
+
+const KNOWN_TIMEFRAMES = ['1min', '5min']
+
+function TimeframeToggle({ timeframes, selected, onSelect }) {
+  // Union of the known timeframes and whatever the DB actually has, so a new
+  // timeframe still appears. Counts come from the summary's per-timeframe breakdown.
+  const countByTf = {}
+  timeframes.forEach(t => { countByTf[t.timeframe] = t.total_bars })
+  const list = [...new Set([...KNOWN_TIMEFRAMES, ...timeframes.map(t => t.timeframe)])]
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+        Timeframe
+      </span>
+      {list.map(tf => {
+        const active = tf === selected
+        const n = countByTf[tf] ?? 0
+        return (
+          <button
+            key={tf}
+            onClick={() => onSelect(tf)}
+            style={{
+              fontSize: 12, fontWeight: 500, padding: '5px 12px', borderRadius: 8,
+              cursor: active ? 'default' : 'pointer',
+              color: active ? '#fff' : 'var(--text-secondary)',
+              background: active ? 'var(--accent)' : 'transparent',
+              border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+              fontVariantNumeric: 'tabular-nums',
+            }}
+          >
+            {tf}
+            <span style={{ opacity: 0.7, marginLeft: 6, fontWeight: 400 }}>
+              {n.toLocaleString()}
+            </span>
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -176,6 +242,57 @@ function Stat({ value, label, small }) {
     <div>
       <div style={{ fontSize: small ? 13 : 20, fontWeight: 600, color: 'var(--text-primary)', lineHeight: 1.5 }}>{value}</div>
       <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{label}</div>
+    </div>
+  )
+}
+
+// ── Data health ─────────────────────────────────────────────────────────────
+
+function DataHealth({ integrity }) {
+  if (!integrity) return null
+  const miss = integrity.missing_weekdays || { count: 0, dates: [] }
+  const dupOk  = (integrity.duplicate_timestamps ?? 0) === 0
+  const gapsOk = (miss.count ?? 0) === 0
+  const clean  = dupOk && gapsOk && (integrity.partial_days ?? 0) === 0
+
+  return (
+    <div style={{ ...card, marginBottom: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+          Data Health
+        </span>
+        <span style={{ fontSize: 11, color: clean ? GREEN : AMBER }}>
+          {clean ? '✓ clean' : '⚠ review'}
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 22, flexWrap: 'wrap', fontSize: 13 }}>
+        <HealthStat n={integrity.complete_days} label={`complete days (≥${integrity.complete_day_threshold ?? 370})`} color={GREEN} />
+        <HealthStat n={integrity.partial_days} label="partial days" color={(integrity.partial_days ?? 0) > 0 ? AMBER : 'var(--text-muted)'} />
+        <HealthStat n={miss.count} label="missing weekdays" color={gapsOk ? 'var(--text-muted)' : RED} />
+        <HealthStat n={integrity.duplicate_timestamps} label="duplicate timestamps" color={dupOk ? 'var(--text-muted)' : RED} />
+      </div>
+
+      <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 10 }}>
+        {integrity.complete_days} complete days, {integrity.partial_days} partial, {miss.count} missing weekdays
+        {integrity.duplicate_timestamps > 0 && ` · ${integrity.duplicate_timestamps} duplicate timestamps`}
+      </div>
+
+      {miss.count > 0 && (
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.6 }}>
+          Gap weekdays (first {Math.min(miss.count, miss.dates.length)}): {miss.dates.join(', ')}
+          {miss.count > miss.dates.length && ` … +${miss.count - miss.dates.length} more`}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function HealthStat({ n, label, color }) {
+  return (
+    <div>
+      <div style={{ fontSize: 18, fontWeight: 600, color, fontVariantNumeric: 'tabular-nums' }}>{(n ?? 0).toLocaleString()}</div>
+      <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>{label}</div>
     </div>
   )
 }

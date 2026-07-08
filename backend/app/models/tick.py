@@ -13,6 +13,9 @@ class Tick(BaseModel):
     close: float
     volume: int
     bar_type: str
+    # Which independent series this bar belongs to ('1min', '5min', …). A 1-min
+    # and a 5-min bar can share a timestamp but are DIFFERENT rows/series.
+    timeframe: str = "1min"
 
 
 class RawMessage(BaseModel):
@@ -26,15 +29,20 @@ class RawMessage(BaseModel):
     close: float
     volume: int
     bar_type: str
+    timeframe: str = "1min"
 
     @classmethod
     def parse(cls, raw: str) -> "RawMessage":
         """
-        Parse TOKEN|TIMESTAMP|SYMBOL|OPEN|HIGH|LOW|CLOSE|VOLUME|BAR_TYPE\\n
+        Parse TOKEN|TIMESTAMP|SYMBOL|OPEN|HIGH|LOW|CLOSE|VOLUME|BAR_TYPE[|TIMEFRAME]\\n
 
         BAR_TYPE is passed through unchanged; any non-"tick" value (e.g. "1min"
         or "hist" for bulk-imported historical bars) is treated downstream as a
         bar close and flows through the full ML/storage path.
+
+        TIMEFRAME (the 10th field) names the independent series the bar belongs to
+        ('1min' / '5min'). It is OPTIONAL for backward compatibility — a 9-field
+        message from an older strategy defaults to '1min'.
 
         Raises ValueError with a descriptive message on any format error.
         """
@@ -43,12 +51,13 @@ class RawMessage(BaseModel):
             raise ValueError("Empty message")
 
         parts = line.split("|")
-        if len(parts) != 9:
+        if len(parts) not in (9, 10):
             raise ValueError(
-                f"Expected 9 pipe-separated fields, got {len(parts)}: {line!r}"
+                f"Expected 9 or 10 pipe-separated fields, got {len(parts)}: {line!r}"
             )
 
-        token, timestamp_str, symbol, open_s, high_s, low_s, close_s, volume_s, bar_type = parts
+        timeframe = parts[9].strip() if len(parts) == 10 else "1min"
+        token, timestamp_str, symbol, open_s, high_s, low_s, close_s, volume_s, bar_type = parts[:9]
         token = token.strip()
 
         if not token:
@@ -92,4 +101,5 @@ class RawMessage(BaseModel):
             close=close_val,
             volume=volume_val,
             bar_type=bar_type.strip(),
+            timeframe=timeframe or "1min",
         )
