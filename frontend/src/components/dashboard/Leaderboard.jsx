@@ -24,30 +24,51 @@ const RANK_COLORS = {
 
 const MEDALS = ['🥇', '🥈', '🥉']
 
+const TF_META = {
+  '5min': { label: '5m', color: '#1D9E75' },
+  '1min': { label: '1m', color: '#7F77DD' },
+}
+
+// Store maps are keyed by the composite id "name:timeframe" (Phase 2).
+function splitKey(key) {
+  const idx = key.lastIndexOf(':')
+  return idx === -1 ? [key, '5min'] : [key.slice(0, idx), key.slice(idx + 1)]
+}
+
 export default function Leaderboard({ style = {} }) {
   const [mode, setMode] = useState('levels')
   const { modelSignals, modelLevels } = useStore()
 
-  // Levels ranking — built directly from store (populated by usePredictions on mount)
+  // Levels ranking — all 19 models across both timeframes, tagged.
   const levelRanking = Object.entries(modelLevels)
-    .map(([name, info]) => ({
-      name,
-      label:  MODEL_LABELS[name] || name,
-      level:  info?.level        ?? 1,
-      rank:   info?.rank         ?? 'Rookie',
-      xp:     info?.xp           ?? 0,
-      xpPct:  info?.xp_progress_pct ?? 0,
-    }))
+    .map(([key, info]) => {
+      const [name, tf] = splitKey(key)
+      return {
+        id:     key,
+        name,
+        timeframe: tf,
+        label:  MODEL_LABELS[name] || name,
+        level:  info?.level        ?? 1,
+        rank:   info?.rank         ?? 'Rookie',
+        xp:     info?.xp           ?? 0,
+        xpPct:  info?.xp_progress_pct ?? 0,
+      }
+    })
     .sort((a, b) => b.level - a.level || b.xp - a.xp)
 
-  // P&L / accuracy ranking — built from live signals; shows confidence until real outcomes arrive
+  // P&L / accuracy ranking — built from live signals across both timeframes.
   const pnlRanking = Object.entries(modelSignals)
-    .map(([name, sig]) => ({
-      name,
-      label:      MODEL_LABELS[name] || name,
-      signal:     sig?.signal     ?? 'HOLD',
-      confidence: sig?.confidence ?? 0,
-    }))
+    .map(([key, sig]) => {
+      const [name, tf] = splitKey(key)
+      return {
+        id:         key,
+        name,
+        timeframe:  tf,
+        label:      MODEL_LABELS[name] || name,
+        signal:     sig?.signal     ?? 'HOLD',
+        confidence: sig?.confidence ?? 0,
+      }
+    })
     .sort((a, b) => b.confidence - a.confidence)
 
   const ranking = mode === 'levels' ? levelRanking : pnlRanking
@@ -92,18 +113,19 @@ export default function Leaderboard({ style = {} }) {
         <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4, scrollbarWidth: 'thin' }}>
           {ranking.map((item, i) => {
             const rankColor = RANK_COLORS[item.rank] || RANK_COLORS.Rookie
+            const tf = TF_META[item.timeframe] || TF_META['5min']
             return (
               <div
-                key={item.name}
+                key={item.id}
                 onClick={() => {
-                  document.getElementById(`model-card-${item.name}`)
+                  document.getElementById(`model-card-${item.id}`)
                     ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
                 }}
                 style={{
                   flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8,
                   padding: '6px 12px', borderRadius: 8, cursor: 'pointer',
                   background: 'var(--surface-3)', border: '0.5px solid var(--border)',
-                  minWidth: 130, transition: 'border-color 0.15s',
+                  minWidth: 140, transition: 'border-color 0.15s',
                 }}
                 onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--accent)'}
                 onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--border)'}
@@ -111,10 +133,17 @@ export default function Leaderboard({ style = {} }) {
                 <span style={{ fontSize: 13 }}>{MEDALS[i] || `#${i + 1}`}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{
-                    fontSize: 11, fontWeight: 500, color: 'var(--text-primary)',
-                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    whiteSpace: 'nowrap', overflow: 'hidden',
                   }}>
-                    {item.label}
+                    <span style={{
+                      fontSize: 11, fontWeight: 500, color: 'var(--text-primary)',
+                      overflow: 'hidden', textOverflow: 'ellipsis',
+                    }}>{item.label}</span>
+                    <span style={{
+                      fontSize: 9, fontWeight: 700, padding: '0 4px', borderRadius: 3,
+                      background: `${tf.color}22`, color: tf.color, flexShrink: 0,
+                    }}>{tf.label}</span>
                   </div>
                   {mode === 'levels' ? (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>

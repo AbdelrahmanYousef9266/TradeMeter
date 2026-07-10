@@ -44,11 +44,11 @@ _STREAM_KEY    = "market:raw"
 _GROUP_NAME    = "ingestion"     # consumer group — survives consumer restarts
 _CONSUMER_NAME = "worker-1"      # stable name so a restart reclaims its pending entries
 
-# The timeframe the ML models currently consume. Phase 1 stores EVERY timeframe
-# but only runs features/learning/prediction on this one, so the models remain
-# exactly 1-min (unchanged) while 5-min bars accumulate in storage for a later
-# phase to wire up. Nothing in models/features/LSTM changes here.
-LIVE_ML_TIMEFRAME = "1min"
+# Phase 2: every timeframe now runs the full features/learning/prediction path on
+# its OWN engine and pipeline (see get_engine/get_pipeline, both keyed by
+# (user, timeframe)). There is no longer a single "ML timeframe" gate — 1-min and
+# 5-min are independent series. The LSTM is the only model scoped to one timeframe
+# (5-min), enforced in the pipeline via model_names_for().
 
 # Per-user state: prev_features, prev_predictions, prev_close
 # {user_id: {"features": dict, "predictions": dict, "close": float}}
@@ -275,16 +275,18 @@ async def flush_queue(user_id: str, redis_client: aioredis.Redis) -> int:
         logger.warning("flush_queue: XTRIM failed: %s", exc)
     await _clear_group_pending(redis_client)
 
-    # Drop the per-user deferred learning state and any buffered (not-yet-filled)
-    # trade signals so nothing fires against bars that were just discarded.
+    # Drop the per-(user, timeframe) deferred learning state and any buffered
+    # (not-yet-filled) trade signals so nothing fires against discarded bars.
+    # State is keyed by (user_id, timeframe), so clear every timeframe for the user.
     uid = str(user_id)
-    _bar_state.pop(uid, None)
+    for k in [k for k in _bar_state if k[0] == uid]:
+        _bar_state.pop(k, None)
     try:
         from app.services.ml.pipeline import _pipelines
-        pl = _pipelines.get(uid)
-        if pl is not None:
-            pl._pending_champion = []
-            pl._pending_challenger = []
+        for pkey, pl in _pipelines.items():
+            if pkey[0] == uid and pl is not None:
+                pl._pending_champion = []
+                pl._pending_challenger = []
     except Exception:
         pass
 
@@ -408,12 +410,12 @@ async def _store_predictions(
             await conn.execute(
                 """INSERT INTO predictions
                        (time, user_id, model_name, signal, confidence,
-                        predicted_high, predicted_low, direction_up_prob, is_training)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
+                        predicted_high, predicted_low, direction_up_prob, is_training, timeframe)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
                 tick.time, uid, model_name,
                 pred.signal, pred.confidence,
                 pred.predicted_high, pred.predicted_low,
-                pred.direction_up, is_training,
+                pred.direction_up, is_training, tick.timeframe,
             )
         except Exception as exc:
             logger.error("Failed to store prediction for %s: %s", model_name, exc)
@@ -492,16 +494,16 @@ async def _process_entry(
         # Non-fatal — ML pipeline and WebSocket publish still run
         logger.error("Ingestion: DB write failed (continuing to ML): %s", exc)
 
-    # ── 3b. TIMEFRAME → ML GATE ───────────────────────────────────────────
-    # Every timeframe is STORED above, but only the ML timeframe (1min) is fed
-    # to features / learning / prediction. Other timeframes (e.g. 5min) are
-    # persisted for the Data layer and a later phase; the models stay 1-min-only
-    # here so their feature-engine state is never corrupted by another series.
-    if tick.timeframe != LIVE_ML_TIMEFRAME:
-        return
+    # ── 3b. FEATURES/ML PER TIMEFRAME ─────────────────────────────────────
+    # Every timeframe now runs the full features/learning/prediction path on its
+    # OWN engine and pipeline (Phase 2). The 1-min and 5-min series are fully
+    # independent — separate rolling indicator state, separate models. lstm runs
+    # on the 5-min pipeline only.
+    tf = tick.timeframe
+    bs_key = (user_id, tf)
 
     # ── 4. Compute features ───────────────────────────────────────────────
-    engine = get_engine(user_id)
+    engine = get_engine(user_id, tf)
     try:
         features = engine.update(tick)
     except Exception as exc:
@@ -518,6 +520,7 @@ async def _process_entry(
                 "type": "tick",
                 "time": tick.time.isoformat(),
                 "bar":  _bar,
+                "timeframe": tf,
                 "training": training,
                 "warmup": {
                     "bars_received": engine.bar_count,
@@ -529,16 +532,16 @@ async def _process_entry(
             logger.error("Ingestion: Redis warmup publish failed: %s", exc)
         return
 
-    # ── 5. Get or create per-user ML pipeline ────────────────────────────
+    # ── 5. Get or create the per-(user, timeframe) ML pipeline ───────────
     try:
         async with db_pool.acquire() as conn:
-            pipeline = await get_pipeline(user_id, conn)
+            pipeline = await get_pipeline(user_id, conn, tf)
     except Exception as exc:
-        logger.error("Ingestion: get_pipeline failed for user %s: %s", user_id, exc)
+        logger.error("Ingestion: get_pipeline failed for user %s/%s: %s", user_id, tf, exc)
         return
 
     # ── 6. Learn from previous bar (Level 3 — trade outcome based) ───────
-    prev = _bar_state.get(user_id)
+    prev = _bar_state.get(bs_key)
     level_up_events = []
     if prev and prev.get("predictions"):
         try:
@@ -607,6 +610,7 @@ async def _process_entry(
             "type":        "bar",
             "time":        tick.time.isoformat(),
             "bar":         _bar,
+            "timeframe":   tf,          # which series this bar/models belong to
             "features":    features,
             "models":      pred_cache,
             "levels":      levels_dict,
@@ -616,7 +620,7 @@ async def _process_entry(
         }))
 
         # 9. Cache latest predictions in Redis
-        await cache_latest_predictions(redis_client, user_id, pred_cache)
+        await cache_latest_predictions(redis_client, user_id, pred_cache, timeframe=tf)
 
         # 10. Store predictions in DB (non-fatal)
         try:
@@ -635,8 +639,8 @@ async def _process_entry(
                 "unlocked":   event.unlocked,
             }))
 
-        # 12. Save state for next bar's learn call
-        _bar_state[user_id] = {
+        # 12. Save state for next bar's learn call (per timeframe)
+        _bar_state[bs_key] = {
             "features":    features,
             "predictions": predictions,
             "close":       tick.close,
@@ -716,46 +720,49 @@ async def _process_hist_batch(
     db_pool: asyncpg.Pool,
     redis_client: aioredis.Redis,
 ) -> None:
-    by_user: dict[str, list] = {}
+    # Group by (user, timeframe): each timeframe learns on its OWN engine and
+    # pipeline (Phase 2), so a mixed 1-min/5-min batch trains both independent
+    # series in the same pass.
+    by_series: dict[tuple[str, str], list] = {}
     for _entry_id, tick in batch:
-        by_user.setdefault(str(tick.user_id), []).append(tick)
+        by_series.setdefault((str(tick.user_id), tick.timeframe), []).append(tick)
 
-    for user_id, ticks in by_user.items():
-        # 1. Bulk-store EVERY bar of EVERY timeframe (including warmup bars) in
-        #    one COPY — each row carries its own timeframe, so a mixed batch stays
-        #    isolated per series.
-        try:
-            await _copy_ticks_to_db(db_pool, ticks, is_training=True)
-        except Exception as exc:
-            logger.error("Ingestion(fast): COPY failed for %s (%d bars): %s", user_id, len(ticks), exc)
+    # 1. Bulk-store EVERY bar of EVERY series in one COPY — each row carries its
+    #    own timeframe, so the series stay isolated even at a shared timestamp.
+    all_ticks = [t for _e, t in batch]
+    try:
+        await _copy_ticks_to_db(db_pool, all_ticks, is_training=True)
+    except Exception as exc:
+        logger.error("Ingestion(fast): COPY failed (%d bars): %s", len(all_ticks), exc)
 
-        # 2. Advance the training run counters for every imported bar.
-        for tick in ticks:
-            _note_training_bar(user_id, tick.time)
+    # 2. Advance the training run counters for every imported bar (per user).
+    for _e, tick in batch:
+        _note_training_bar(str(tick.user_id), tick.time)
 
-        # 3. In-memory learning — ONLY the ML timeframe (1min). Other timeframes
-        #    are stored above but not learned yet (models stay 1-min-only).
-        ml_ticks = [t for t in ticks if t.timeframe == LIVE_ML_TIMEFRAME]
-        if not ml_ticks:
-            await _publish_training_progress(user_id, redis_client)
-            continue
+    pending = await get_queue_pending(redis_client)
+    users_seen: set[str] = set()
 
-        engine = get_engine(user_id)
+    for (user_id, tf), ticks in by_series.items():
+        users_seen.add(user_id)
+
+        # 3. In-memory learning on this timeframe's engine + pipeline.
+        engine = get_engine(user_id, tf)
         try:
             async with db_pool.acquire() as conn:
-                pipeline = await get_pipeline(user_id, conn)
+                pipeline = await get_pipeline(user_id, conn, tf)
         except Exception as exc:
-            logger.error("Ingestion(fast): get_pipeline failed for %s: %s", user_id, exc)
+            logger.error("Ingestion(fast): get_pipeline failed for %s/%s: %s", user_id, tf, exc)
             continue
 
-        for tick in ml_ticks:
+        bs_key = (user_id, tf)
+        for tick in ticks:
             try:
                 features = engine.update(tick)
             except Exception:
                 continue
             if features is None:
                 continue   # warmup
-            prev = _bar_state.get(user_id)
+            prev = _bar_state.get(bs_key)
             if prev and prev.get("predictions"):
                 try:
                     await pipeline.learn_all(
@@ -765,38 +772,38 @@ async def _process_hist_batch(
                         db_conn=None, redis_client=redis_client, fast_mode=True,
                     )
                 except Exception as exc:
-                    logger.error("Ingestion(fast): learn_all failed for %s: %s", user_id, exc)
+                    logger.error("Ingestion(fast): learn_all failed for %s/%s: %s", user_id, tf, exc)
             try:
                 predictions = await pipeline.predict_all(
                     features, tick.close, current_bar_open=tick.open, bar_time=tick.time,
                 )
-                _bar_state[user_id] = {
+                _bar_state[bs_key] = {
                     "features": features, "predictions": predictions, "close": tick.close,
                 }
             except Exception as exc:
-                logger.error("Ingestion(fast): predict_all failed for %s: %s", user_id, exc)
+                logger.error("Ingestion(fast): predict_all failed for %s/%s: %s", user_id, tf, exc)
 
         # 4. Persist the level ladder every batch (cheap). Weights are pickled +
-        #    written far less often — pickling all models is the batch's main cost
+        #    written far less often (pickling all models is the batch's main cost)
         #    — every _HIST_STATE_SAVE_EVERY bars, plus a final save when the queue
-        #    drains (import finished) so the last partial chunk isn't lost.
+        #    drains so the last partial chunk isn't lost. Throttle per (user, tf).
         try:
             async with db_pool.acquire() as conn:
                 await pipeline._save_levels(conn)
         except Exception as exc:
-            logger.warning("Ingestion(fast): level persist failed for %s: %s", user_id, exc)
+            logger.warning("Ingestion(fast): level persist failed for %s/%s: %s", user_id, tf, exc)
 
-        pending = await get_queue_pending(redis_client)
-        _hist_save_accum[user_id] = _hist_save_accum.get(user_id, 0) + len(ticks)
-        if _hist_save_accum[user_id] >= _HIST_STATE_SAVE_EVERY or pending == 0:
+        _hist_save_accum[bs_key] = _hist_save_accum.get(bs_key, 0) + len(ticks)
+        if _hist_save_accum[bs_key] >= _HIST_STATE_SAVE_EVERY or pending == 0:
             try:
                 async with db_pool.acquire() as conn:
                     await pipeline.save_state(conn)
-                _hist_save_accum[user_id] = 0
+                _hist_save_accum[bs_key] = 0
             except Exception as exc:
-                logger.warning("Ingestion(fast): weight persist failed for %s: %s", user_id, exc)
+                logger.warning("Ingestion(fast): weight persist failed for %s/%s: %s", user_id, tf, exc)
 
-        # 5. One throttled progress event (replaces the per-bar WS broadcast).
+    # 5. One throttled progress event per user (replaces the per-bar WS broadcast).
+    for user_id in users_seen:
         await _publish_training_progress(user_id, redis_client, pending)
 
 

@@ -54,50 +54,72 @@ MODEL_REGISTRY: dict[str, type] = {
     "contrarian":     ContrarianModel,
 }
 
-# 8 CC personality models + personal + the batch-trained LSTM (Model 11).
-# lstm is included here so it participates in XP, levels, and the leaderboard,
-# but it is NOT in MODEL_REGISTRY (no Champion/Challenger — it's batch-trained).
-ALL_MODEL_NAMES = list(MODEL_REGISTRY.keys()) + ["personal", "lstm"]
+# The batch-trained LSTM (Model 11) runs on the 5-min timeframe ONLY (it is the
+# primary trading timeframe). The 8 CC personality models + personal run on EVERY
+# timeframe. So per timeframe: 1-min → 9 online models (no lstm); 5-min → the same
+# 9 online models + lstm.
+LSTM_TIMEFRAME = "5min"
+
+# 9 online models present on both timeframes (8 CC personalities + personal).
+ONLINE_MODEL_NAMES = list(MODEL_REGISTRY.keys()) + ["personal"]
+
+# Full superset (5-min set): 9 online + lstm. Kept as ALL_MODEL_NAMES for
+# backward compatibility with callers/tests that want "every model name".
+ALL_MODEL_NAMES = ONLINE_MODEL_NAMES + ["lstm"]
+
+
+def model_names_for(timeframe: str) -> list[str]:
+    """Model names that run on a timeframe: lstm only on the 5-min series."""
+    if timeframe == LSTM_TIMEFRAME:
+        return ONLINE_MODEL_NAMES + ["lstm"]
+    return list(ONLINE_MODEL_NAMES)
 
 
 # ── Pipeline class ─────────────────────────────────────────────────────────
 
 class MLPipeline:
-    """Per-user ML state: CC models, XP trackers, drift detectors, trade manager."""
+    """Per-(user, timeframe) ML state: CC models, XP trackers, drift detectors,
+    trade managers. Each timeframe is a fully independent set of models — the
+    5-min Momentum and the 1-min Momentum are separate competitors with their own
+    weights, XP, trades, and persistence. The default timeframe is the primary
+    trading timeframe (5-min), which carries the full model set including lstm."""
 
-    def __init__(self, user_id: str, initial_levels: dict) -> None:
+    def __init__(self, user_id: str, initial_levels: dict, timeframe: str = "5min") -> None:
         self.user_id = user_id
+        self.timeframe = timeframe
+        self.model_names = model_names_for(timeframe)
+        self._has_lstm = "lstm" in self.model_names
 
-        # Wrap each personality model in Champion/Challenger
+        # Wrap each personality model in Champion/Challenger (both timeframes)
         self.cc_models: dict[str, ChampionChallenger] = {}
         for name, cls in MODEL_REGISTRY.items():
             base_instance  = cls()
             initial_params = base_instance.get_settings()
             self.cc_models[name] = ChampionChallenger(name, cls, initial_params)
 
-        # Personal model — no CC, keeps its own blend logic
+        # Personal model — no CC, keeps its own blend logic (both timeframes)
         self.personal = PersonalModel(user_id)
 
-        # LSTM (Model 11) — batch-trained, inference-only. No CC.
+        # LSTM (Model 11) — 5-min only. Batch-trained, inference-only, no CC.
         # Loads its trained weights from model_state in get_pipeline().
-        self.lstm = LSTMModel(user_id)
+        self.lstm = LSTMModel(user_id) if self._has_lstm else None
 
-        # XP tracker per model
+        # XP tracker per model on THIS timeframe
         self.xp_trackers: dict[str, XPTracker] = {
             name: XPTracker(user_id, name, **initial_levels.get(name, {}))
-            for name in ALL_MODEL_NAMES
+            for name in self.model_names
         }
 
         # Drift detectors (kept for API compatibility; not actively used in CC mode)
         self.drift_detectors: dict[str, DriftDetector] = {
             name: DriftDetector(user_id, name)
-            for name in ALL_MODEL_NAMES
+            for name in self.model_names
         }
 
         # Level rank cache
         self.level_ranks: dict[str, str] = {
             name: level_to_rank(self.xp_trackers[name].level)
-            for name in ALL_MODEL_NAMES
+            for name in self.model_names
         }
 
         # Champion (live) trade book — its outcomes drive the dashboard + XP.
@@ -152,9 +174,11 @@ class MLPipeline:
             features, predictions, self.level_ranks
         )
 
-        # LSTM (Model 11) — inference only. Feeds its rolling window every bar
-        # (even when dormant) and returns HOLD until trained + window full.
-        predictions["lstm"] = self.lstm.predict(features, last_close)
+        # LSTM (Model 11, 5-min only) — inference only. Feeds its rolling window
+        # every bar (even when dormant) and returns HOLD until trained + window
+        # full. Absent on the 1-min pipeline.
+        if self.lstm is not None:
+            predictions["lstm"] = self.lstm.predict(features, last_close)
 
         if current_bar_open is not None and bar_time is not None:
             # 1. Fill signals buffered on the PREVIOUS bar at THIS bar's real open.
@@ -287,7 +311,7 @@ class MLPipeline:
         # to update here. Advance its bars_learned/XP only once it is actually
         # trained and predicting live, so the dashboard reflects real activity
         # instead of a frozen 0 (and no phantom bars accrue while it is dormant).
-        if self.lstm.is_trained:
+        if self.lstm is not None and self.lstm.is_trained:
             self._baseline_award("lstm", predictions.get("lstm"), actual_direction, level_up_events)
 
         # ── 3. Trade-close refinement (Level 3 P&L) ────────────────────────
@@ -418,16 +442,16 @@ class MLPipeline:
         for name, tracker in self.xp_trackers.items():
             await db_conn.execute(
                 """INSERT INTO model_levels
-                       (user_id, model_name, level, xp, streak, bars_learned, updated_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, NOW())
-                   ON CONFLICT (user_id, model_name)
+                       (user_id, model_name, timeframe, level, xp, streak, bars_learned, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+                   ON CONFLICT (user_id, model_name, timeframe)
                    DO UPDATE SET
                        level        = EXCLUDED.level,
                        xp           = EXCLUDED.xp,
                        streak       = EXCLUDED.streak,
                        bars_learned = EXCLUDED.bars_learned,
                        updated_at   = EXCLUDED.updated_at""",
-                uid, name,
+                uid, name, self.timeframe,
                 tracker.level, tracker.xp, tracker.streak, tracker.bars_learned,
             )
 
@@ -442,7 +466,8 @@ class MLPipeline:
                        bars_held      = $5
                    WHERE user_id    = $6
                      AND model_name = $7
-                     AND time       = $8""",
+                     AND time       = $8
+                     AND timeframe  = $9""",
                 "win" if trade.won else "loss",
                 trade.pnl_points,
                 trade.pnl_dollars,
@@ -451,6 +476,7 @@ class MLPipeline:
                 _uuid.UUID(trade.user_id),
                 trade.model_name,
                 trade.entry_time,
+                self.timeframe,
             )
         except Exception as exc:
             logger.warning("_save_trade failed (non-fatal): %s", exc)
@@ -496,13 +522,13 @@ class MLPipeline:
                 continue
             try:
                 await db_conn.execute(
-                    """INSERT INTO model_state (user_id, model_name, state, bars_count, updated_at)
-                       VALUES ($1, $2, $3, $4, NOW())
-                       ON CONFLICT (user_id, model_name)
+                    """INSERT INTO model_state (user_id, model_name, timeframe, state, bars_count, updated_at)
+                       VALUES ($1, $2, $3, $4, $5, NOW())
+                       ON CONFLICT (user_id, model_name, timeframe)
                        DO UPDATE SET state      = EXCLUDED.state,
                                      bars_count = EXCLUDED.bars_count,
                                      updated_at = EXCLUDED.updated_at""",
-                    uid, name, blob, self.bar_count,
+                    uid, name, self.timeframe, blob, self.bar_count,
                 )
             except Exception as exc:
                 logger.warning("save_state: DB write failed for %s/%s: %s", self.user_id, name, exc)
@@ -549,39 +575,41 @@ class MLPipeline:
             logger.warning("MLflow snapshot failed (non-fatal): %s", exc)
 
 
-# ── Global per-user registry ───────────────────────────────────────────────
+# ── Global per-(user, timeframe) registry ───────────────────────────────────
 
-_pipelines: dict[str, MLPipeline] = {}
-_pipeline_locks: dict[str, asyncio.Lock] = {}
+_pipelines: dict[tuple[str, str], MLPipeline] = {}
+_pipeline_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
 
-async def get_pipeline(user_id, db_conn: asyncpg.Connection) -> MLPipeline:
-    # Canonical key: str(user_id). The DB queries below re-parse it with
-    # _uuid.UUID(user_id), which accepts this string form, so both a str and a
-    # uuid.UUID caller resolve to the same _pipelines entry.
+async def get_pipeline(user_id, db_conn: asyncpg.Connection, timeframe: str = "5min") -> MLPipeline:
+    # Canonical key: (str(user_id), timeframe). The DB queries below re-parse the
+    # user_id with _uuid.UUID(user_id), which accepts the string form, so both a
+    # str and a uuid.UUID caller resolve to the same pipeline. Each timeframe is
+    # an independent pipeline with its own persisted state.
     user_id = str(user_id)
+    key = (user_id, timeframe)
 
     # Fast path — no lock needed for reads once the pipeline exists
-    if user_id in _pipelines:
-        return _pipelines[user_id]
+    if key in _pipelines:
+        return _pipelines[key]
 
-    # Ensure a per-user lock exists (synchronous, atomic in asyncio — no await between
-    # the check and the assignment so no race on lock creation itself)
-    if user_id not in _pipeline_locks:
-        _pipeline_locks[user_id] = asyncio.Lock()
+    # Ensure a per-(user, timeframe) lock exists (synchronous, atomic in asyncio —
+    # no await between the check and the assignment so no race on lock creation)
+    if key not in _pipeline_locks:
+        _pipeline_locks[key] = asyncio.Lock()
 
-    async with _pipeline_locks[user_id]:
+    async with _pipeline_locks[key]:
         # Re-check inside the lock: another coroutine may have created the
         # pipeline while we were waiting to acquire the lock
-        if user_id in _pipelines:
-            return _pipelines[user_id]
+        if key in _pipelines:
+            return _pipelines[key]
 
         try:
             rows = await db_conn.fetch(
                 """SELECT model_name, level, xp, streak, bars_learned
                    FROM   model_levels
-                   WHERE  user_id = $1""",
-                _uuid.UUID(user_id),
+                   WHERE  user_id = $1 AND timeframe = $2""",
+                _uuid.UUID(user_id), timeframe,
             )
             initial_levels = {
                 r["model_name"]: {
@@ -593,19 +621,19 @@ async def get_pipeline(user_id, db_conn: asyncpg.Connection) -> MLPipeline:
                 for r in rows
             }
         except Exception as exc:
-            logger.warning("get_pipeline: could not load model levels for %s (%s) — using defaults", user_id, exc)
+            logger.warning("get_pipeline: could not load model levels for %s/%s (%s) — using defaults", user_id, timeframe, exc)
             initial_levels = {}
 
-        pipeline = MLPipeline(user_id, initial_levels)
+        pipeline = MLPipeline(user_id, initial_levels, timeframe=timeframe)
 
-        # Restore persisted River weights so learning survives restarts.
-        # Falls back to fresh models on any load/unpickle failure.
-        # The 'lstm' row uses a different (PyTorch) format and is loaded
-        # separately below, so it is excluded from restore_state here.
+        # Restore persisted River weights so learning survives restarts, scoped to
+        # THIS timeframe. Falls back to fresh models on any load/unpickle failure.
+        # The 'lstm' row uses a different (PyTorch) format and is loaded separately
+        # below, so it is excluded from restore_state here.
         try:
             state_rows = await db_conn.fetch(
-                "SELECT model_name, state FROM model_state WHERE user_id = $1",
-                _uuid.UUID(user_id),
+                "SELECT model_name, state FROM model_state WHERE user_id = $1 AND timeframe = $2",
+                _uuid.UUID(user_id), timeframe,
             )
             saved = {r["model_name"]: r["state"] for r in state_rows or []}
 
@@ -614,25 +642,25 @@ async def get_pipeline(user_id, db_conn: asyncpg.Connection) -> MLPipeline:
             if saved:
                 n = pipeline.restore_state(saved)
                 logger.info(
-                    "get_pipeline: restored %d/%d River model states for user %s",
-                    n, len(saved), user_id,
+                    "get_pipeline: restored %d/%d River model states for user %s/%s",
+                    n, len(saved), user_id, timeframe,
                 )
 
-            if lstm_blob is not None:
+            if lstm_blob is not None and pipeline.lstm is not None:
                 try:
                     pipeline.lstm.load(lstm_blob)
-                    logger.info("get_pipeline: restored trained LSTM for user %s", user_id)
+                    logger.info("get_pipeline: restored trained LSTM for user %s/%s", user_id, timeframe)
                 except Exception as exc:
                     logger.warning(
-                        "get_pipeline: LSTM load failed for %s (%s) — staying untrained",
-                        user_id, exc,
+                        "get_pipeline: LSTM load failed for %s/%s (%s) — staying untrained",
+                        user_id, timeframe, exc,
                     )
         except Exception as exc:
             logger.warning(
-                "get_pipeline: model_state load failed for %s (%s) — using fresh models",
-                user_id, exc,
+                "get_pipeline: model_state load failed for %s/%s (%s) — using fresh models",
+                user_id, timeframe, exc,
             )
 
-        _pipelines[user_id] = pipeline
-        logger.info("ML pipeline created for user %s", user_id)
+        _pipelines[key] = pipeline
+        logger.info("ML pipeline created for user %s/%s", user_id, timeframe)
         return pipeline

@@ -90,20 +90,21 @@ class FakeRedis:
 
 @pytest.fixture(autouse=True)
 def _clean():
-    for d in (ingestion._last_bar_time, ingestion._bar_state, ingestion._training_mode,
-              ingestion._training_bar_count, ingestion._training_sessions):
-        d.clear()
-    features._engines.clear()
     from app.services.ml.pipeline import _pipelines, _pipeline_locks
-    _pipelines.pop(USER, None)
-    _pipeline_locks.pop(USER, None)
+
+    def _reset():
+        for d in (ingestion._last_bar_time, ingestion._bar_state, ingestion._training_mode,
+                  ingestion._training_bar_count, ingestion._training_sessions):
+            d.clear()
+        features._engines.clear()
+        # Pipeline/lock registries are keyed by (user_id, timeframe) — clear all tf.
+        for reg in (_pipelines, _pipeline_locks):
+            for k in [k for k in reg if isinstance(k, tuple) and k[0] == USER]:
+                reg.pop(k, None)
+
+    _reset()
     yield
-    for d in (ingestion._last_bar_time, ingestion._bar_state, ingestion._training_mode,
-              ingestion._training_bar_count, ingestion._training_sessions):
-        d.clear()
-    features._engines.clear()
-    _pipelines.pop(USER, None)
-    _pipeline_locks.pop(USER, None)
+    _reset()
 
 
 def _tick(i):
@@ -132,8 +133,9 @@ async def test_fast_batch_copies_bars_learns_and_reports_progress():
     # Symbol from a continuous contract flows through untouched into the records.
     assert pool.conn.copied[0][1][0][2] == "MES 09-26"
     # Learning actually happened (bars past warmup advanced bars_learned).
+    # The bars default to the 1-min timeframe → the (USER, "1min") pipeline.
     from app.services.ml.pipeline import _pipelines
-    assert _pipelines[USER].xp_trackers["momentum"].bars_learned > 0
+    assert _pipelines[(USER, "1min")].xp_trackers["momentum"].bars_learned > 0
     # Exactly one throttled progress event (not one WS bar per bar).
     prog = [m for _c, m in redis.published if '"training_progress"' in m]
     assert len(prog) == 1
@@ -183,17 +185,17 @@ async def test_hist_when_training_off_goes_to_normal_path(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_flush_queue_drops_backlog_and_clears_state():
-    ingestion._bar_state[USER] = {"features": {}, "predictions": {}, "close": 1.0}
+    ingestion._bar_state[(USER, "1min")] = {"features": {}, "predictions": {}, "close": 1.0}
     # A pipeline with a buffered pending trade that must be cleared.
     from app.services.ml.pipeline import MLPipeline, _pipelines
-    pl = MLPipeline(USER, {})
+    pl = MLPipeline(USER, {}, timeframe="1min")
     pl._pending_champion = [{"model_name": "momentum"}]
-    _pipelines[USER] = pl
+    _pipelines[(USER, "1min")] = pl
 
     redis = FakeRedis(length=5)
     dropped = await flush_queue(USER, redis)
 
     assert dropped == 5
     assert redis.trimmed == (0, False)             # XTRIM MAXLEN 0
-    assert USER not in ingestion._bar_state         # deferred state cleared
+    assert (USER, "1min") not in ingestion._bar_state   # deferred state cleared
     assert pl._pending_champion == []               # buffered trades cleared

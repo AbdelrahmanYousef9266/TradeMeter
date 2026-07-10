@@ -27,14 +27,15 @@ export default function StreamDashboard() {
   const [showArch, setShowArch] = useState(false)
   const [view, setView] = useState('grid')  // 'grid' | 'race' | 'both'
 
-  // Build ranked model list by session P&L (for the leaderboard ordering)
+  // Build ranked model list by session P&L (for the leaderboard ordering).
+  // The stream view shows the PRIMARY (5-min) trading series.
   const ranked = MODEL_ORDER
     .map(name => ({
       name,
       meta: MODEL_META[name],
-      signal: modelSignals[name] || {},
-      level: modelLevels[name] || {},
-      pnl: modelPnl[name] || {},
+      signal: modelSignals[`${name}:5min`] || {},
+      level: modelLevels[`${name}:5min`] || {},
+      pnl: modelPnl[`${name}:5min`] || {},
     }))
     .sort((a, b) => (b.pnl.points ?? 0) - (a.pnl.points ?? 0))
 

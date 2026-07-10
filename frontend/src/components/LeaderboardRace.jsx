@@ -19,13 +19,13 @@ export default function LeaderboardRace({ compact = false }) {
 
   const ROW_HEIGHT = compact ? 30 : 44   // smaller rows in compact (AFK) mode
 
-  // Build a stable list of models with their current P&L
+  // Build a stable list of models with their current P&L (primary 5-min series).
   const models = MODEL_NAMES.map(name => ({
     name,
     meta: MODEL_META[name],
-    pnl: modelPnl[name]?.points ?? 0,
-    wins: modelPnl[name]?.wins ?? 0,
-    losses: modelPnl[name]?.losses ?? 0,
+    pnl: modelPnl[`${name}:5min`]?.points ?? 0,
+    wins: modelPnl[`${name}:5min`]?.wins ?? 0,
+    losses: modelPnl[`${name}:5min`]?.losses ?? 0,
   }))
 
   // Sort by P&L descending to get current ranking

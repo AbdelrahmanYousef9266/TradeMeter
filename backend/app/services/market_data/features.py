@@ -266,17 +266,23 @@ class FeatureEngine:
 
 
 # ── Global registry ────────────────────────────────────────────────────────
+#
+# Keyed by (str(user_id), timeframe): each timeframe is an INDEPENDENT series
+# with its own rolling indicator state (EMA/RSI/ATR/VWAP/MACD, session/VWAP
+# resets). A 1-min bar updates only the 1-min engine and a 5-min bar only the
+# 5-min engine — they never share or contaminate state.
 
-_engines: dict[str, FeatureEngine] = {}
+_engines: dict[tuple[str, str], FeatureEngine] = {}
 
 
-def get_engine(user_id) -> FeatureEngine:
-    """Return the FeatureEngine for this user, creating one if it doesn't exist.
+def get_engine(user_id, timeframe: str = "5min") -> FeatureEngine:
+    """Return the FeatureEngine for this (user, timeframe), creating one lazily.
 
-    Keyed by the canonical str(user_id) so a str and a uuid.UUID for the same
-    user never map to two different engines.
+    Keyed by the canonical (str(user_id), timeframe) so a str and a uuid.UUID for
+    the same user never map to two different engines, and so 1-min and 5-min keep
+    fully separate indicator state.
     """
-    user_id = str(user_id)
-    if user_id not in _engines:
-        _engines[user_id] = FeatureEngine()
-    return _engines[user_id]
+    key = (str(user_id), timeframe)
+    if key not in _engines:
+        _engines[key] = FeatureEngine()
+    return _engines[key]

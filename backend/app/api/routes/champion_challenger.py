@@ -12,9 +12,12 @@ router = APIRouter()
 
 
 @router.get("")
-async def get_cc_status(user: User = Depends(get_current_user)) -> dict:
-    """CC status for all 8 personality models (champion + challenger stats)."""
-    pipeline = _pipelines.get(str(user.id))
+async def get_cc_status(
+    timeframe: str = "5min",
+    user: User = Depends(get_current_user),
+) -> dict:
+    """CC status for all 8 personality models on *timeframe* (champion + challenger)."""
+    pipeline = _pipelines.get((str(user.id), timeframe))
     if not pipeline:
         return {}
     return pipeline.get_cc_status()
@@ -23,10 +26,11 @@ async def get_cc_status(user: User = Depends(get_current_user)) -> dict:
 @router.get("/{model_name}")
 async def get_model_cc_status(
     model_name: str,
+    timeframe: str = "5min",
     user: User = Depends(get_current_user),
 ) -> dict:
-    """CC status for a single model."""
-    pipeline = _pipelines.get(str(user.id))
+    """CC status for a single model on *timeframe*."""
+    pipeline = _pipelines.get((str(user.id), timeframe))
     if not pipeline or model_name not in pipeline.cc_models:
         return {}
     return pipeline.cc_models[model_name].get_status()
@@ -35,10 +39,11 @@ async def get_model_cc_status(
 @router.post("/{model_name}/evaluate")
 async def force_evaluation(
     model_name: str,
+    timeframe: str = "5min",
     user: User = Depends(get_current_user),
 ) -> dict:
-    """Force an immediate Champion/Challenger evaluation for this model."""
-    pipeline = _pipelines.get(str(user.id))
+    """Force an immediate Champion/Challenger evaluation for this model on *timeframe*."""
+    pipeline = _pipelines.get((str(user.id), timeframe))
     if not pipeline or model_name not in pipeline.cc_models:
         return {"error": "Model not found or pipeline not loaded"}
 

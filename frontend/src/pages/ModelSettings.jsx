@@ -1,8 +1,13 @@
 import { useEffect, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { getModelSettings, updateModelSettings, resetModel, getModelLevel } from '../services/api'
 import ModelBehavior from '../components/settings/ModelBehavior'
-import useStore from '../store'
+import useStore, { modelKey } from '../store'
+
+const TF_META = {
+  '5min': { label: '5-min', color: '#1D9E75' },
+  '1min': { label: '1-min', color: '#7F77DD' },
+}
 
 const RANK_COLORS = {
   Rookie: '#6b7280', Apprentice: '#185FA5', Pro: '#0F6E56',
@@ -25,6 +30,8 @@ const card = {
 
 export default function ModelSettings() {
   const { modelName } = useParams()
+  const [searchParams] = useSearchParams()
+  const timeframe = searchParams.get('tf') === '1min' ? '1min' : '5min'
   const modelLevels = useStore(s => s.modelLevels)
 
   const [levelInfo,  setLevelInfo]  = useState(null)
@@ -40,8 +47,8 @@ export default function ModelSettings() {
   useEffect(() => {
     if (!modelName) return
     Promise.all([
-      getModelLevel(modelName),
-      getModelSettings(modelName),
+      getModelLevel(modelName, timeframe),
+      getModelSettings(modelName, timeframe),
     ])
       .then(([lvlRes, settRes]) => {
         setLevelInfo(lvlRes.data)
@@ -52,10 +59,10 @@ export default function ModelSettings() {
       })
       .catch(e => setError(e.message || 'Failed to load'))
       .finally(() => setLoading(false))
-  }, [modelName])
+  }, [modelName, timeframe])
 
-  // Merge with live WS level info
-  const live = modelLevels[modelName]
+  // Merge with live WS level info (timeframe-scoped)
+  const live = modelLevels[modelKey(modelName, timeframe)]
   const lvl  = live || levelInfo
 
   const handleSave = async () => {
@@ -63,13 +70,13 @@ export default function ModelSettings() {
     Object.entries(localVals).forEach(([k, v]) => {
       if (settings[k] && !settings[k].locked) payload[k] = v
     })
-    await updateModelSettings(modelName, payload)
+    await updateModelSettings(modelName, payload, timeframe)
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
   }
 
   const handleReset = async () => {
-    await resetModel(modelName)
+    await resetModel(modelName, timeframe)
     setResetDone(true)
     setTimeout(() => setResetDone(false), 3000)
   }
@@ -101,6 +108,11 @@ export default function ModelSettings() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
         <Link to="/dashboard" style={{ color: 'var(--text-secondary)', fontSize: 13 }}>← Dashboard</Link>
         <h1 style={{ fontSize: 17, fontWeight: 500 }}>{labelName}</h1>
+        <span style={{
+          fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 5,
+          background: `${(TF_META[timeframe] || TF_META['5min']).color}22`,
+          color: (TF_META[timeframe] || TF_META['5min']).color,
+        }}>{(TF_META[timeframe] || TF_META['5min']).label}</span>
       </div>
 
       {/* Level header */}

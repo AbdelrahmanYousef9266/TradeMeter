@@ -9,12 +9,22 @@ import IngestionControl from '../components/dashboard/IngestionControl'
 import TradeSignalPanel from '../components/dashboard/TradeSignalPanel'
 import LevelUpToast    from '../components/dashboard/LevelUpToast'
 import LiveChart      from '../components/chart/LiveChart'
-import useStore       from '../store'
+import useStore, { modelKey } from '../store'
 import { logout as apiLogout, getNTStatus, getMe } from '../services/api'
 
-const MODEL_ORDER = [
+// The 9 online personality models run on BOTH timeframes; lstm is 5-min only.
+const ONLINE_MODELS = [
   'scalper', 'momentum', 'mean_reversion', 'breakout',
-  'conservative', 'aggressive', 'volume', 'contrarian', 'personal', 'lstm',
+  'conservative', 'aggressive', 'volume', 'contrarian', 'personal',
+]
+
+// Model groups per timeframe. 5-min is the primary (trading) series → shown first;
+// 1-min is context. 10 (5-min incl. lstm) + 9 (1-min) = 19 competitors.
+const MODEL_GROUPS = [
+  { timeframe: '5min', label: '5-Minute · Primary (trading timeframe)', accent: '#1D9E75',
+    models: [...ONLINE_MODELS, 'lstm'] },
+  { timeframe: '1min', label: '1-Minute · Context', accent: '#7F77DD',
+    models: [...ONLINE_MODELS] },
 ]
 
 // Persistent NT indicator. Polls the REAL NT status (/auth/nt-status) rather than
@@ -142,33 +152,75 @@ export default function Dashboard() {
         <TradeSignalPanel />
       </div>
 
-      {/* Live chart */}
+      {/* Chart timeframe toggle + live chart */}
+      <ChartTimeframeToggle />
       <LiveChart bars={barHistory} style={{ marginBottom: 12 }} />
 
-      {/* Leaderboard */}
+      {/* Leaderboard (all 19 models, both timeframes, tagged) */}
       <Leaderboard style={{ marginBottom: 12 }} />
 
-      {/* 3-column model grid */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(3, 1fr)',
-        gap: 10,
-      }}>
-        {MODEL_ORDER.map(name => (
-          name === 'lstm' ? (
-            <LSTMCard
-              key={name}
-              signal={modelSignals[name]}
-              levelInfo={modelLevels[name]}
-            />
-          ) : (
-            <ModelCard key={name} modelName={name} />
-          )
-        ))}
-      </div>
+      {/* Model grid — grouped by timeframe, 5-min primary first */}
+      {MODEL_GROUPS.map(group => (
+        <div key={group.timeframe} style={{ marginBottom: 16 }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8, margin: '4px 2px 10px',
+          }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: '50%', background: group.accent, flexShrink: 0,
+            }} />
+            <span style={{
+              fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)',
+              textTransform: 'uppercase', letterSpacing: '0.06em',
+            }}>{group.label}</span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+            {group.models.map(name => (
+              name === 'lstm' ? (
+                <LSTMCard
+                  key={modelKey(name, group.timeframe)}
+                  signal={modelSignals[modelKey(name, group.timeframe)]}
+                  levelInfo={modelLevels[modelKey(name, group.timeframe)]}
+                />
+              ) : (
+                <ModelCard key={modelKey(name, group.timeframe)}
+                           modelName={name} timeframe={group.timeframe} />
+              )
+            ))}
+          </div>
+        </div>
+      ))}
 
       {/* Single coalescing level-up / CC-promotion toast — fixed bottom-right */}
       <LevelUpToast />
+    </div>
+  )
+}
+
+// Chart timeframe selector — the chart renders one series at a time (both stream).
+function ChartTimeframeToggle() {
+  const chartTimeframe    = useStore(s => s.chartTimeframe)
+  const setChartTimeframe = useStore(s => s.setChartTimeframe)
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+      <span style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.04em' }}>
+        Chart timeframe
+      </span>
+      <div style={{ display: 'flex', gap: 2, background: 'var(--surface-3)', borderRadius: 7, padding: 2 }}>
+        {[['5min', '5m'], ['1min', '1m']].map(([tf, label]) => (
+          <button
+            key={tf}
+            onClick={() => chartTimeframe !== tf && setChartTimeframe(tf)}
+            style={{
+              padding: '3px 12px', borderRadius: 5, fontSize: 11, border: 'none', cursor: 'pointer',
+              background: chartTimeframe === tf ? 'var(--accent)' : 'transparent',
+              color:      chartTimeframe === tf ? '#fff' : 'var(--text-secondary)',
+              fontWeight: chartTimeframe === tf ? 500 : 400,
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }

@@ -32,7 +32,7 @@ class FakeConn:
 
     async def execute(self, query, *args):
         if "INTO model_state" in query:
-            _uid, name, blob, _bars = args
+            _uid, name, _tf, blob, _bars = args
             self.store[name] = blob
 
     async def fetch(self, query, *args):

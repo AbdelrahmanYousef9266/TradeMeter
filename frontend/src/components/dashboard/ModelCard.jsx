@@ -1,5 +1,11 @@
 import { Link } from 'react-router-dom'
-import useStore from '../../store'
+import useStore, { modelKey } from '../../store'
+
+// Small timeframe chip: 5-min is the primary (trading) series, 1-min is context.
+const TF_META = {
+  '5min': { label: '5m', color: '#1D9E75', bg: '#1D9E7522' },
+  '1min': { label: '1m', color: '#7F77DD', bg: '#7F77DD22' },
+}
 
 const MODEL_META = {
   scalper:        { label: 'Scalper',         style: 'Ultra short-term' },
@@ -23,14 +29,16 @@ const RANK_COLORS = {
   Master:     '#D85A30',
 }
 
-export default function ModelCard({ modelName }) {
+export default function ModelCard({ modelName, timeframe = '5min' }) {
   const { modelSignals, modelLevels, modelPnl } = useStore()
 
-  const signal = modelSignals[modelName] || {}
-  const level  = modelLevels[modelName] || {}
-  const pnl    = modelPnl[modelName] || {}
+  const key    = modelKey(modelName, timeframe)
+  const signal = modelSignals[key] || {}
+  const level  = modelLevels[key] || {}
+  const pnl    = modelPnl[key] || {}
 
   const meta = MODEL_META[modelName] || { label: modelName, style: '' }
+  const tf   = TF_META[timeframe] || TF_META['5min']
   const isPersonal = modelName === 'personal'
   const isLSTM = modelName === 'lstm'
 
@@ -62,7 +70,7 @@ export default function ModelCard({ modelName }) {
                  : 'var(--text-muted)'
 
   return (
-    <div style={{
+    <div id={`model-card-${modelName}:${timeframe}`} style={{
       background: 'var(--surface-2)',
       border: isPersonal ? '2px solid var(--border-accent)' : '0.5px solid var(--border)',
       borderRadius: '12px',
@@ -79,7 +87,13 @@ export default function ModelCard({ modelName }) {
           {meta.label.slice(0,2).toUpperCase()}
         </div>
         <div style={{ flex:1, minWidth:0 }}>
-          <div style={{ fontSize:'13px', fontWeight:500, color:'var(--text-primary)' }}>{meta.label}</div>
+          <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+            <span style={{ fontSize:'13px', fontWeight:500, color:'var(--text-primary)' }}>{meta.label}</span>
+            <span style={{
+              fontSize:'9px', fontWeight:700, padding:'1px 5px', borderRadius:'4px',
+              background: tf.bg, color: tf.color, letterSpacing:'0.03em',
+            }}>{tf.label}</span>
+          </div>
           <div style={{ fontSize:'11px', color:'var(--text-muted)' }}>{meta.style}</div>
         </div>
         <span style={{
@@ -175,7 +189,7 @@ export default function ModelCard({ modelName }) {
           Batch trained
         </span>
       ) : (
-        <Link to={`/models/${modelName}`} style={{
+        <Link to={`/models/${modelName}?tf=${timeframe}`} style={{
           display:'block', textAlign:'center', fontSize:'11px',
           padding:'6px', borderRadius:'var(--radius)',
           border:'0.5px solid var(--border-strong)',

@@ -26,6 +26,10 @@ from app.services.market_data.features import FeatureEngine
 
 logger = logging.getLogger(__name__)
 
+# The LSTM is the 5-min model (Phase 2) — the primary trading timeframe. Its data
+# gate, training set, and persisted state all live under this timeframe.
+LSTM_TIMEFRAME = "5min"
+
 
 # ── Live training-progress registry (per user) ───────────────────────────────
 #
@@ -91,13 +95,12 @@ async def count_available_bars(db_conn, user_id) -> int:
     Training-tagged bars still count — replayed history is legitimate data — but
     each timestamp counts once.
     """
-    # Scoped to the 1-min series only. Multi-timeframe (Phase 1) stores 5-min
-    # bars too, but the LSTM remains a 1-min model here — filtering keeps its
-    # data (and behavior) identical to before, with no other timeframe leaking in.
+    # Scoped to the 5-min series (Phase 2): the LSTM is the 5-min model — the
+    # primary trading timeframe. Only 5-min bars count toward its activation gate.
     row = await db_conn.fetchrow(
         "SELECT COUNT(DISTINCT time) AS n FROM ticks "
-        "WHERE user_id = $1 AND bar_type != 'tick' AND timeframe = '1min'",
-        _as_uuid(user_id),
+        "WHERE user_id = $1 AND bar_type != 'tick' AND timeframe = $2",
+        _as_uuid(user_id), LSTM_TIMEFRAME,
     )
     return row["n"] if row else 0
 
@@ -121,14 +124,14 @@ async def build_training_data(db_conn, user_id):
     # is_training ASC makes it prefer the live row over a training copy when both
     # exist. Training-tagged bars are still included — the fix is dedup, not
     # exclusion. The result is strictly increasing in time with no duplicates.
-    # 1-min series only (see count_available_bars): the LSTM stays a 1-min model
-    # in Phase 1, so 5-min bars never enter its training set.
+    # 5-min series only (see count_available_bars): the LSTM is the 5-min model
+    # in Phase 2, so only 5-min bars enter its training set.
     rows = await db_conn.fetch(
         """SELECT DISTINCT ON (time) time, open, high, low, close, volume, bar_type
            FROM ticks
-           WHERE user_id = $1 AND bar_type != 'tick' AND timeframe = '1min'
+           WHERE user_id = $1 AND bar_type != 'tick' AND timeframe = $2
            ORDER BY time ASC, is_training ASC""",
-        _as_uuid(user_id),
+        _as_uuid(user_id), LSTM_TIMEFRAME,
     )
 
     if len(rows) < MIN_BARS_TO_ACTIVATE:
@@ -334,15 +337,16 @@ async def train_lstm(db_conn, user_id, epochs: int = 20,
     model.train_samples = n_samples
     model.train_accuracy = val_acc
 
-    # Persist into the shared model_state table (column is `state`, not `state_blob`).
+    # Persist into the shared model_state table under the 5-min timeframe (the
+    # LSTM's series), keyed by (user_id, 'lstm', '5min').
     await db_conn.execute(
-        """INSERT INTO model_state (user_id, model_name, state, bars_count, updated_at)
-           VALUES ($1, 'lstm', $2, $3, NOW())
-           ON CONFLICT (user_id, model_name)
+        """INSERT INTO model_state (user_id, model_name, timeframe, state, bars_count, updated_at)
+           VALUES ($1, 'lstm', $2, $3, $4, NOW())
+           ON CONFLICT (user_id, model_name, timeframe)
            DO UPDATE SET state      = EXCLUDED.state,
                          bars_count = EXCLUDED.bars_count,
                          updated_at = NOW()""",
-        _as_uuid(user_id), model.serialize(), n_samples,
+        _as_uuid(user_id), LSTM_TIMEFRAME, model.serialize(), n_samples,
     )
 
     logger.info(

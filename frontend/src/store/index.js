@@ -41,26 +41,34 @@ const useStore = create((set) => ({
   // setBarHistory: bulk-replace history (used to hydrate the chart on page load)
   setBarHistory: (bars) => set({ barHistory: bars, currentBar: bars[bars.length - 1] ?? null }),
 
-  // Model signals keyed by model name
+  // ── Multi-timeframe model maps ────────────────────────────────────────────
+  // Phase 2: the same model_name runs on BOTH the 1-min and 5-min series as
+  // independent competitors, so these maps are keyed by the composite id
+  // `${name}:${timeframe}` (e.g. "momentum:5min") — matching the backend's `id`.
+  // Read with modelKey(name, tf). Updaters default to the primary (5-min).
+
   // Each entry: { signal, confidence, direction_up, direction_down, predicted_high, predicted_low }
   modelSignals: {},
-  updateModelSignal: (name, signal) => set(state => ({
-    modelSignals: { ...state.modelSignals, [name]: signal },
+  updateModelSignal: (name, signal, timeframe = '5min') => set(state => ({
+    modelSignals: { ...state.modelSignals, [`${name}:${timeframe}`]: signal },
   })),
 
-  // Model level info keyed by model name
   // Each entry: { level, xp, streak, rank, xp_progress_pct, unlocked_settings }
   modelLevels: {},
-  updateModelLevel: (name, level) => set(state => ({
-    modelLevels: { ...state.modelLevels, [name]: level },
+  updateModelLevel: (name, level, timeframe = '5min') => set(state => ({
+    modelLevels: { ...state.modelLevels, [`${name}:${timeframe}`]: level },
   })),
 
-  // Session P&L keyed by model name
   // Each entry: { points, dollars, wins, losses, open }
   modelPnl: {},
-  updateModelPnl: (name, pnl) => set(state => ({
-    modelPnl: { ...state.modelPnl, [name]: pnl },
+  updateModelPnl: (name, pnl, timeframe = '5min') => set(state => ({
+    modelPnl: { ...state.modelPnl, [`${name}:${timeframe}`]: pnl },
   })),
+
+  // Which timeframe's candles the live chart renders (both series stream now;
+  // rendering one keeps the chart from interleaving 1-min and 5-min bars).
+  chartTimeframe: '5min',
+  setChartTimeframe: (tf) => set({ chartTimeframe: tf, barHistory: [], currentBar: null }),
 
   // Leaderboard data
   leaderboardPnl:    [],
@@ -105,5 +113,8 @@ const useStore = create((set) => ({
   },
   setSettings: (settings) => set({ settings }),
 }))
+
+// Composite key for the timeframe-scoped model maps (modelSignals/Levels/Pnl).
+export const modelKey = (name, timeframe = '5min') => `${name}:${timeframe}`
 
 export default useStore

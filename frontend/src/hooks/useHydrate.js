@@ -16,6 +16,7 @@ import { getMarketStatus, getRecentBars } from '../services/api'
  */
 export function useHydrate() {
   const { setWarmup, setNtConnected, setBarHistory } = useStore()
+  const chartTimeframe = useStore(s => s.chartTimeframe)
 
   useEffect(() => {
     // Warmup / connection state
@@ -31,13 +32,13 @@ export function useHydrate() {
       })
       .catch(() => {})
 
-    // Chart history
-    getRecentBars(200)
+    // Chart history for the selected timeframe (re-hydrates on timeframe switch)
+    getRecentBars(200, chartTimeframe)
       .then(res => {
         if (Array.isArray(res.data) && res.data.length > 0) {
           setBarHistory(res.data)
         }
       })
       .catch(() => {})
-  }, [])
+  }, [chartTimeframe])
 }

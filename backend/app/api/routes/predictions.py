@@ -20,27 +20,28 @@ router = APIRouter()
 
 @router.get("/latest")
 async def get_latest(
+    timeframe: str = "5min",
     user: User = Depends(get_current_user),
     redis=Depends(get_redis),
     conn=Depends(get_db),
 ) -> dict:
     """
-    Most recent signals for all 10 models.
-    Served from Redis cache; falls back to DB query on cache miss.
+    Most recent signals for the models on *timeframe* (default 5-min, the primary
+    trading timeframe). Served from Redis cache; falls back to DB on cache miss.
     """
-    cached = await get_latest_predictions(redis, str(user.id))
+    cached = await get_latest_predictions(redis, str(user.id), timeframe)
     if cached:
         return cached
 
-    # Cache miss — fetch most recent prediction per model from DB
+    # Cache miss — fetch most recent prediction per model from DB (this timeframe)
     rows = await conn.fetch(
         """SELECT DISTINCT ON (model_name)
                model_name, signal, confidence, direction_up_prob,
                predicted_high, predicted_low, time
            FROM predictions
-           WHERE user_id = $1
+           WHERE user_id = $1 AND timeframe = $2
            ORDER BY model_name, time DESC""",
-        user.id,
+        user.id, timeframe,
     )
     return {
         row["model_name"]: {
@@ -58,6 +59,7 @@ async def get_latest(
 @router.get("/history")
 async def get_history(
     model_name: str | None  = Query(None),
+    timeframe:  str         = Query("5min"),
     from_ts:    datetime    = Query(...),
     to_ts:      datetime    = Query(...),
     limit:      int         = Query(100, le=1000),
@@ -65,7 +67,7 @@ async def get_history(
     conn=Depends(get_db),
 ) -> list[dict]:
     """
-    Past predictions with actual_outcome filled.
+    Past predictions with actual_outcome filled, scoped to *timeframe*.
     Filter by model_name, time range, and limit.
     """
     if model_name:
@@ -75,11 +77,12 @@ async def get_history(
                FROM   predictions
                WHERE  user_id    = $1
                  AND  model_name = $2
-                 AND  time      >= $3
-                 AND  time      <= $4
+                 AND  timeframe  = $3
+                 AND  time      >= $4
+                 AND  time      <= $5
                ORDER  BY time DESC
-               LIMIT  $5""",
-            user.id, model_name, from_ts, to_ts, limit,
+               LIMIT  $6""",
+            user.id, model_name, timeframe, from_ts, to_ts, limit,
         )
     else:
         rows = await conn.fetch(
@@ -87,11 +90,12 @@ async def get_history(
                       predicted_high, predicted_low, actual_outcome
                FROM   predictions
                WHERE  user_id = $1
-                 AND  time   >= $2
-                 AND  time   <= $3
+                 AND  timeframe = $2
+                 AND  time   >= $3
+                 AND  time   <= $4
                ORDER  BY time DESC
-               LIMIT  $4""",
-            user.id, from_ts, to_ts, limit,
+               LIMIT  $5""",
+            user.id, timeframe, from_ts, to_ts, limit,
         )
 
     return [

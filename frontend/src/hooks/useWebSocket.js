@@ -100,12 +100,17 @@ export function useWebSocket(enabled = true) {
         try {
           const msg = JSON.parse(e.data)
 
+          // Each message names its series; default to the primary (5-min).
+          const tf = msg.timeframe || '5min'
+          const chartTf = useStore.getState().chartTimeframe
+
           if (msg.type === 'tick') {
-            // Real-time price update (inter-bar tick or warmup bar close).
-            // Updates the live price display only — does NOT create a new chart candle.
-            setCurrentBar({ time: msg.time, ...msg.bar })
-            // Warmup progress is embedded in tick messages during the 50-bar warmup period
-            if (msg.warmup?.warming_up) {
+            // Real-time price update (inter-bar tick or warmup bar close). Only the
+            // chart's selected timeframe drives the price line, so the two series
+            // don't fight over the live candle.
+            if (tf === chartTf) setCurrentBar({ time: msg.time, ...msg.bar })
+            // Warmup progress is embedded in tick messages during the 50-bar warmup.
+            if (msg.warmup?.warming_up && tf === chartTf) {
               setWarmup({
                 barsReceived: msg.warmup.bars_received,
                 barsNeeded:   msg.warmup.bars_needed,
@@ -116,17 +121,20 @@ export function useWebSocket(enabled = true) {
           }
 
           if (msg.type === 'bar') {
-            // Bar close with ML predictions — append new candle + update model cards
-            setBar({ ...msg.bar, time: msg.time, features: msg.features })
-            setWarmup({ isWarmingUp: false, ntConnected: true })
+            // Model cards update for BOTH series (keyed by timeframe); the chart
+            // candle is appended only for the selected chart timeframe.
+            if (tf === chartTf) {
+              setBar({ ...msg.bar, time: msg.time, features: msg.features })
+              setWarmup({ isWarmingUp: false, ntConnected: true })
+            }
             if (msg.models) {
-              Object.entries(msg.models).forEach(([name, signal]) => updateModelSignal(name, signal))
+              Object.entries(msg.models).forEach(([name, signal]) => updateModelSignal(name, signal, tf))
             }
             if (msg.levels) {
-              Object.entries(msg.levels).forEach(([name, level]) => updateModelLevel(name, level))
+              Object.entries(msg.levels).forEach(([name, level]) => updateModelLevel(name, level, tf))
             }
             if (msg.session_pnl) {
-              Object.entries(msg.session_pnl).forEach(([name, pnl]) => updateModelPnl(name, pnl))
+              Object.entries(msg.session_pnl).forEach(([name, pnl]) => updateModelPnl(name, pnl, tf))
             }
           }
 

@@ -194,8 +194,8 @@ class _E2EConn:
 
     async def execute(self, q, *a):
         if "INTO model_state" in q:
-            # args: (user_id, state_blob, bars_count)
-            self.saved["lstm"] = a[1]
+            # args: (user_id, timeframe, state_blob, bars_count)
+            self.saved["lstm"] = a[2]
 
 
 @pytest.mark.asyncio

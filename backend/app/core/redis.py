@@ -83,13 +83,15 @@ async def get_latest_tick(client: aioredis.Redis, user_id: str) -> dict | None:
 
 
 async def cache_latest_predictions(
-    client: aioredis.Redis, user_id: str, predictions: dict
+    client: aioredis.Redis, user_id: str, predictions: dict, timeframe: str = "5min"
 ) -> None:
-    await client.set(f"latest_predictions:{user_id}", json.dumps(predictions), ex=300)
+    # Scoped by timeframe so the 1-min and 5-min pipelines don't overwrite each
+    # other's latest signals (each series caches independently).
+    await client.set(f"latest_predictions:{user_id}:{timeframe}", json.dumps(predictions), ex=300)
 
 
 async def get_latest_predictions(
-    client: aioredis.Redis, user_id: str
+    client: aioredis.Redis, user_id: str, timeframe: str = "5min"
 ) -> dict | None:
-    raw = await client.get(f"latest_predictions:{user_id}")
+    raw = await client.get(f"latest_predictions:{user_id}:{timeframe}")
     return json.loads(raw) if raw else None

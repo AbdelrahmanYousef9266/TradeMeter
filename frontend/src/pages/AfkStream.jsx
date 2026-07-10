@@ -136,26 +136,27 @@ export default function AfkStream() {
     return () => clearInterval(id)
   }, [])
 
-  // ── Derived model stats (all from the live store) ──────────────────────
+  // ── Derived model stats (all 19 models, both timeframes) ───────────────
+  // Store maps are keyed by the composite id "name:timeframe" (Phase 2); the
+  // base model name is the part before the last ':'.
   const stats = useMemo(() => {
     let totalWins = 0, totalLosses = 0, samples = 0, predictions = 0
     let leader = null, leaderPts = -Infinity
     let bestAcc = null
 
-    const active = MODEL_NAMES.filter(n => modelSignals[n] || modelLevels[n])
+    const activeKeys = new Set([...Object.keys(modelSignals), ...Object.keys(modelLevels)])
 
-    MODEL_NAMES.forEach(name => {
-      const p = modelPnl[name] || {}
-      const l = modelLevels[name] || {}
-      const w = p.wins ?? 0, ls = p.losses ?? 0
+    Object.entries(modelLevels).forEach(([, l]) => {
+      samples += l?.bars_learned ?? 0
+      predictions = Math.max(predictions, l?.bars_learned ?? 0)
+    })
+
+    Object.entries(modelPnl).forEach(([key, p]) => {
+      const w = p?.wins ?? 0, ls = p?.losses ?? 0
       totalWins += w
       totalLosses += ls
-      samples += l.bars_learned ?? 0
-      predictions = Math.max(predictions, l.bars_learned ?? 0)
-
-      const pts = p.points ?? 0
-      if (pts > leaderPts) { leaderPts = pts; leader = name }
-
+      const pts = p?.points ?? 0
+      if (pts > leaderPts) { leaderPts = pts; leader = key.split(':')[0] }
       if (w + ls > 0) {
         const acc = w / (w + ls)
         if (bestAcc === null || acc > bestAcc) bestAcc = acc
@@ -166,7 +167,7 @@ export default function AfkStream() {
       ? totalWins / (totalWins + totalLosses) : null
 
     return {
-      activeCount: active.length || MODEL_NAMES.length,
+      activeCount: activeKeys.size || MODEL_NAMES.length,
       leader: (leader && leaderPts !== 0) ? leader : null,
       leaderPts,
       bestAcc,
@@ -176,11 +177,10 @@ export default function AfkStream() {
     }
   }, [modelSignals, modelLevels, modelPnl])
 
-  // Most recent non-HOLD signal = highest-confidence live non-HOLD across models.
+  // Most recent non-HOLD signal = highest-confidence live non-HOLD across all models.
   const lastSignal = useMemo(() => {
     let best = null
-    MODEL_NAMES.forEach(name => {
-      const s = modelSignals[name]
+    Object.values(modelSignals).forEach(s => {
       if (s && s.signal && s.signal !== 'HOLD') {
         if (!best || (s.confidence ?? 0) > (best.confidence ?? 0)) {
           best = { signal: s.signal, confidence: s.confidence ?? 0 }

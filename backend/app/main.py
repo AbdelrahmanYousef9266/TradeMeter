@@ -75,7 +75,7 @@ async def nightly_lstm_training(app: FastAPI) -> None:
     import uuid as _uuid
     from datetime import datetime, timezone
 
-    from app.services.ml.lstm_trainer import train_lstm, count_available_bars
+    from app.services.ml.lstm_trainer import train_lstm, count_available_bars, LSTM_TIMEFRAME
     from app.services.ml.lstm_model import MIN_BARS_TO_ACTIVATE
     from app.services.ml.pipeline import _pipelines
 
@@ -87,21 +87,24 @@ async def nightly_lstm_training(app: FastAPI) -> None:
             if now.hour != 7:           # ~2 AM ET
                 continue
 
-            for user_id in list(_pipelines.keys()):
+            # Pipelines are keyed by (user_id, timeframe) — train each distinct
+            # user once (the LSTM is a single 5-min model per user).
+            for user_id in {k[0] for k in _pipelines.keys()}:
                 try:
                     async with app.state.db_pool.acquire() as conn:
                         bars = await count_available_bars(conn, user_id)
                         if bars < MIN_BARS_TO_ACTIVATE:
                             continue
-                        logger.info("Nightly LSTM training for user %s (%d bars)…", user_id, bars)
+                        logger.info("Nightly LSTM training for user %s (%d 5-min bars)…", user_id, bars)
                         result = await train_lstm(conn, user_id)
                         logger.info("Nightly LSTM result for %s: %s", user_id, result)
 
-                        pipeline = _pipelines.get(user_id)
-                        if pipeline and result.get("success"):
+                        # Reload freshly-trained weights into the live 5-min pipeline.
+                        pipeline = _pipelines.get((user_id, LSTM_TIMEFRAME))
+                        if pipeline and pipeline.lstm is not None and result.get("success"):
                             row = await conn.fetchrow(
-                                "SELECT state FROM model_state WHERE user_id=$1 AND model_name='lstm'",
-                                _uuid.UUID(user_id),
+                                "SELECT state FROM model_state WHERE user_id=$1 AND model_name='lstm' AND timeframe=$2",
+                                _uuid.UUID(user_id), LSTM_TIMEFRAME,
                             )
                             if row:
                                 pipeline.lstm.load(row["state"])

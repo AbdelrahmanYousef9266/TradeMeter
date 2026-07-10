@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import useStore from '../../store'
+import useStore, { modelKey } from '../../store'
 import { getModelSettings } from '../../services/api'
+
+// The actionable trade call is drawn from the PRIMARY (5-min) trading timeframe.
+const SIGNAL_TIMEFRAME = '5min'
 
 /**
  * TradeSignalPanel — ONE clear, actionable trade plan per bar.
@@ -45,10 +48,10 @@ export default function TradeSignalPanel({ compact = false }) {
   const leader = useMemo(() => {
     let best = null
     for (const name of MODEL_NAMES) {
-      const s = modelSignals[name]
+      const s = modelSignals[modelKey(name, SIGNAL_TIMEFRAME)]
       if (!s || (s.signal !== 'BUY' && s.signal !== 'SELL')) continue
       const conf = s.confidence ?? 0
-      const pts  = modelPnl[name]?.points ?? 0
+      const pts  = modelPnl[modelKey(name, SIGNAL_TIMEFRAME)]?.points ?? 0
       if (!best || conf > best.conf || (conf === best.conf && pts > best.pts)) {
         best = { name, signal: s.signal, conf, pts }
       }
@@ -62,7 +65,7 @@ export default function TradeSignalPanel({ compact = false }) {
   useEffect(() => {
     if (!leaderName || settingsCache[leaderName]) return
     let active = true
-    getModelSettings(leaderName)
+    getModelSettings(leaderName, SIGNAL_TIMEFRAME)
       .then(res => {
         if (!active) return
         const s = res.data || {}
@@ -152,7 +155,7 @@ export default function TradeSignalPanel({ compact = false }) {
     )
   }
 
-  const rank = modelLevels[leaderName]?.rank ?? 'Rookie'
+  const rank = modelLevels[modelKey(leaderName, SIGNAL_TIMEFRAME)]?.rank ?? 'Rookie'
   const confPct = Math.max(0, Math.min(100, Math.round((leader.conf ?? 0) * 100)))
   const label = MODEL_LABELS[leaderName] || leaderName
 
@@ -160,7 +163,7 @@ export default function TradeSignalPanel({ compact = false }) {
     <Shell accent={accent} flash={flash} pad={pad}>
       {/* Header */}
       <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.1em', color: 'var(--text-muted)', textTransform: 'uppercase' }}>
-        Live Signal from <span style={{ color: 'var(--text-secondary)' }}>{label}</span>
+        Live 5-min Signal from <span style={{ color: 'var(--text-secondary)' }}>{label}</span>
         {' · '}{rank}{' · '}<span style={{ color: accent }}>{confPct}% confidence</span>
       </div>
 
