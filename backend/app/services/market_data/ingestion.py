@@ -808,7 +808,7 @@ async def _publish_training_progress(user_id, redis_client, pending=None) -> Non
         await redis_client.publish(f"live:{user_id}", json.dumps({
             "type":          "training_progress",
             "processed":     _training_bar_count.get(user_id, 0),
-            "queue_pending": pending,
+            "queue_pending": max(0, pending),   # never emit a negative depth
         }))
     except Exception:
         pass

@@ -14,7 +14,7 @@ import logging
 import re
 import time
 import uuid as _uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -241,10 +241,97 @@ async def data_coverage(
 # row, so live_bars + training_bars may exceed total_bars — that overlap is
 # expected and intentional (a day the user both streamed live and re-imported).
 
-# A near-full US equity RTH session is 390 one-minute bars (9:30–16:00 ET).
-# We call a day "complete" at >= 370 bars, leaving ~20 bars of slack for the
-# open/close auction minutes and the odd dropped bar. Approximate by design.
-_COMPLETE_DAY_BARS = 370
+# A full US equity RTH session is 390 minutes (9:30–16:00 ET). How many bars that
+# fills depends on the timeframe: 390 one-minute bars, 78 five-minute bars, etc.
+# A day is "complete" at ~95% of the timeframe's expected count — a small slack
+# for the open/close auction minutes and the odd dropped bar. Approximate by
+# design. 1min → 370, 5min → 74. (A hardcoded 370 wrongly marked every 5-min day
+# partial, since a full 5-min day is only ~78 bars.)
+_RTH_MINUTES = 390
+
+
+def _timeframe_minutes(timeframe: str) -> int:
+    """Minutes per bar for a label like '1min' / '5min' / '15min' (default 1)."""
+    m = re.match(r"\s*(\d+)\s*min", (timeframe or ""), re.IGNORECASE)
+    return int(m.group(1)) if m and int(m.group(1)) > 0 else 1
+
+
+def _complete_day_threshold(timeframe: str) -> int:
+    """Bars that mark a day 'complete' for this timeframe (full RTH − 5% slack)."""
+    expected = _RTH_MINUTES / _timeframe_minutes(timeframe)
+    return max(1, int(round(expected * 0.95)))
+
+
+# ── US equity-market holiday calendar ────────────────────────────────────────
+#
+# The NYSE/NASDAQ are closed on these days, so a missing weekday that is a market
+# holiday is NOT a data gap and must not trip the "missing weekdays" review badge.
+# This is the single, maintainable source of truth for the closed-day list.
+#
+# Fixed-date holidays observe the standard shift: if the date lands on Saturday it
+# is observed the preceding Friday, on Sunday the following Monday. Floating
+# holidays (nth-weekday / last-Monday / Good Friday) already fall on a weekday.
+# Half-days (e.g. the Friday after Thanksgiving, Christmas Eve) are NOT included —
+# those are shortened sessions with bars, correctly classified as partial, not
+# missing.
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
+    """The nth (1-based) `weekday` (Mon=0…Sun=6) of a month, e.g. 3rd Monday."""
+    d = date(year, month, 1)
+    offset = (weekday - d.weekday()) % 7
+    return d + timedelta(days=offset + 7 * (n - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    """The last `weekday` of a month, e.g. last Monday of May (Memorial Day)."""
+    d = date(year, month, 28)          # step forward from the 28th
+    while d.month == month:
+        d += timedelta(days=1)
+    d -= timedelta(days=1)              # last day of month
+    return d - timedelta(days=(d.weekday() - weekday) % 7)
+
+
+def _easter_sunday(year: int) -> date:
+    """Gregorian Easter Sunday (Anonymous algorithm) — anchors Good Friday."""
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def _observed(d: date) -> date:
+    """Weekend → observed weekday shift for fixed-date holidays."""
+    if d.weekday() == 5:               # Saturday → Friday
+        return d - timedelta(days=1)
+    if d.weekday() == 6:               # Sunday → Monday
+        return d + timedelta(days=1)
+    return d
+
+
+def _us_market_holidays(year: int) -> set[date]:
+    """Full-closure US equity market holidays for a calendar year."""
+    days = {
+        _observed(date(year, 1, 1)),               # New Year's Day
+        _nth_weekday(year, 1, 0, 3),               # MLK Day — 3rd Monday of January
+        _nth_weekday(year, 2, 0, 3),               # Presidents Day — 3rd Monday of February
+        _easter_sunday(year) - timedelta(days=2),  # Good Friday
+        _last_weekday(year, 5, 0),                 # Memorial Day — last Monday of May
+        _observed(date(year, 7, 4)),               # Independence Day
+        _nth_weekday(year, 9, 0, 1),               # Labor Day — 1st Monday of September
+        _nth_weekday(year, 11, 3, 4),              # Thanksgiving — 4th Thursday of November
+        _observed(date(year, 12, 25)),             # Christmas Day
+    }
+    if year >= 2021:                               # Juneteenth — federal holiday since 2021
+        days.add(_observed(date(year, 6, 19)))
+    return days
 
 # Rough on-disk size per stored row (OHLCV + ids + overhead). Order-of-magnitude
 # only — for a "how big is this getting" gut check, not an exact figure.
@@ -287,6 +374,7 @@ async def data_summary(
     timeframes so the Data tab can show 1-min and 5-min coverage side by side.
     """
     timeframes = await _timeframe_breakdown(conn, user.id)
+    threshold  = _complete_day_threshold(timeframe)
 
     try:
         totals = await conn.fetchrow(
@@ -317,7 +405,7 @@ async def data_summary(
             "months":             [],
             "instrument":         None,
             "storage_estimate_mb": 0.0,
-            "complete_day_threshold": _COMPLETE_DAY_BARS,
+            "complete_day_threshold": threshold,
         }
 
     try:
@@ -375,7 +463,7 @@ async def data_summary(
         ],
         "instrument":            instrument,
         "storage_estimate_mb":   round(raw_rows * _BYTES_PER_ROW / (1024 * 1024), 2),
-        "complete_day_threshold": _COMPLETE_DAY_BARS,
+        "complete_day_threshold": threshold,
     }
 
 
@@ -399,6 +487,7 @@ async def data_days(
 
     start = datetime(year, mon, 1, tzinfo=timezone.utc)
     end   = datetime(year + (mon // 12), (mon % 12) + 1, 1, tzinfo=timezone.utc)
+    threshold = _complete_day_threshold(timeframe)
 
     try:
         rows = await conn.fetch(
@@ -431,14 +520,14 @@ async def data_days(
             "bars":        r["bars"],
             "first_bar":   r["first_bar"].isoformat() if r["first_bar"] else None,
             "last_bar":    r["last_bar"].isoformat() if r["last_bar"] else None,
-            "is_complete": r["bars"] >= _COMPLETE_DAY_BARS,
+            "is_complete": r["bars"] >= threshold,
             "kind":        kind,
         })
 
     return {
         "month":                  month,
         "days":                   days,
-        "complete_day_threshold": _COMPLETE_DAY_BARS,
+        "complete_day_threshold": threshold,
     }
 
 
@@ -483,17 +572,22 @@ async def data_integrity(
         logger.warning("data_integrity: dup query failed for user %s: %s", user.id, exc)
         duplicate_timestamps = 0
 
+    threshold     = _complete_day_threshold(timeframe)
     days_with_bars = {r["day"] for r in day_rows}
     total_days    = len(day_rows)
-    complete_days = sum(1 for r in day_rows if r["bars"] >= _COMPLETE_DAY_BARS)
+    complete_days = sum(1 for r in day_rows if r["bars"] >= threshold)
     partial_days  = total_days - complete_days
 
-    # Weekday gaps: any Mon–Fri inside [first, last] that has zero bars.
+    # Weekday gaps: any Mon–Fri inside [first, last] that has zero bars AND is not
+    # a US market holiday (the market is closed on holidays, so those are not gaps).
     missing: list[str] = []
     if day_rows:
         cur, last = day_rows[0]["day"], day_rows[-1]["day"]
+        holidays = set()
+        for yr in range(cur.year, last.year + 1):
+            holidays |= _us_market_holidays(yr)
         while cur <= last:
-            if cur.weekday() < 5 and cur not in days_with_bars:
+            if cur.weekday() < 5 and cur not in days_with_bars and cur not in holidays:
                 missing.append(cur.isoformat())
             cur += timedelta(days=1)
 
@@ -507,7 +601,7 @@ async def data_integrity(
             "min": day_rows[0]["day"].isoformat()  if day_rows else None,
             "max": day_rows[-1]["day"].isoformat() if day_rows else None,
         },
-        "complete_day_threshold": _COMPLETE_DAY_BARS,
+        "complete_day_threshold": threshold,
     }
 
 

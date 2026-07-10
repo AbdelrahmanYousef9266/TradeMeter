@@ -27,7 +27,7 @@ export default function IngestionControl() {
   const applyStatus = useCallback((d) => {
     if (!d) return
     setArmed(!!d.armed)
-    setQueued(d.queue_pending ?? 0)
+    setQueued(Math.max(0, d.queue_pending ?? 0))   // never negative
   }, [])
 
   // Hydrate once, then poll: armed flag + queue depth, and the REAL NT connection

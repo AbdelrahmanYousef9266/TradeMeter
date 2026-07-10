@@ -50,7 +50,7 @@ export default function LSTMCard({ signal, levelInfo }) {
   const isTrained = status?.is_trained
   const bars      = status?.bars_available ?? 0
   const needed    = status?.bars_needed ?? 2000
-  const pct       = status?.progress_pct ?? 0
+  const pct       = Math.max(0, Math.min(100, status?.progress_pct ?? 0))   // clamp 0–100
   const sigData   = signal && !dormant ? signal : null
 
   return (

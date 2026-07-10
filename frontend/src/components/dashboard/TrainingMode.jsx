@@ -26,7 +26,7 @@ export default function TrainingMode() {
     setTraining(!!d.training)
     setBars(d.bars_ingested ?? 0)
     setSessions(d.sessions_ingested ?? 0)
-    setQueued(d.queue_pending ?? 0)
+    setQueued(Math.max(0, d.queue_pending ?? 0))   // never negative
   }, [])
 
   // Hydrate once, then poll while active OR while anything is still queued, so

@@ -114,6 +114,9 @@ export default function Dashboard() {
           <Link to="/data" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
             Data
           </Link>
+          <Link to="/stream/afk" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+            📺 Stream
+          </Link>
           <Link to="/settings" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
             Settings
           </Link>

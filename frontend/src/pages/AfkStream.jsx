@@ -1,6 +1,9 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import useStore from '../store'
-import { getSystemStats, getTrainingStatus, getLSTMStatus, getIngestionStatus } from '../services/api'
+import {
+  getSystemStats, getTrainingStatus, getLSTMStatus, getIngestionStatus,
+  armIngestion, disarmIngestion, startTraining, stopTraining,
+} from '../services/api'
 import ArchitectureDiagram from '../components/ArchitectureDiagram'
 import LeaderboardRace from '../components/LeaderboardRace'
 import TradeSignalPanel from '../components/dashboard/TradeSignalPanel'
@@ -64,7 +67,7 @@ export default function AfkStream() {
     const poll = () => getTrainingStatus().then(r => {
       if (!active) return
       setTraining(!!r.data?.training)
-      setTrainQueue(r.data?.queue_pending ?? 0)
+      setTrainQueue(Math.max(0, r.data?.queue_pending ?? 0))   // never negative
     }).catch(() => {})
     poll()
     const id = setInterval(poll, 2000)
@@ -74,7 +77,11 @@ export default function AfkStream() {
   // ── Poll ingestion arm-gate status every 5s (drives armed/idle narration) ──
   useEffect(() => {
     let active = true
-    const poll = () => getIngestionStatus().then(r => active && setIng(r.data || { armed: false, queue_pending: 0 })).catch(() => {})
+    const poll = () => getIngestionStatus().then(r => {
+      if (!active) return
+      const d = r.data || {}
+      setIng({ armed: !!d.armed, queue_pending: Math.max(0, d.queue_pending ?? 0) })
+    }).catch(() => {})
     poll()
     const id = setInterval(poll, 5000)
     return () => { active = false; clearInterval(id) }
@@ -245,9 +252,12 @@ export default function AfkStream() {
       return { dot: PURPLE, text: `🧬 Neural network trained${acc}` }
     }
     // 2. Bulk import draining (training mode on + bars still queued).
-    if (training && trainQueue > 0) {
+    // "bars remaining" is the queue depth directly, clamped ≥ 0 — never a
+    // subtraction that can go negative when the baseline desyncs after flush.
+    const remaining = Math.max(0, trainQueue)
+    if (training && remaining > 0) {
       const ctx = [year, inst].filter(Boolean).join(' ')
-      return { dot: PURPLE, text: `📥 Ingesting ${ctx ? ctx + ' ' : ''}data — ${trainQueue.toLocaleString()} bars remaining` }
+      return { dot: PURPLE, text: `📥 Ingesting ${ctx ? ctx + ' ' : ''}data — ${remaining.toLocaleString()} bars remaining` }
     }
     // 3. Training mode armed, queue empty — waiting for the blast.
     if (training) {
@@ -265,6 +275,34 @@ export default function AfkStream() {
     // 6. Disarmed / idle.
     return { dot: GRAY, text: '⏸ Idle — ingestion paused' }
   }, [lstm, lstmDoneAt, now, training, trainQueue, ing, dataFlowing, currentBar, symbol])
+
+  // ── Operator controls — same endpoints/state as the dashboard components ──
+  // These write the same backend flags the dashboard's IngestionControl /
+  // TrainingMode use, so a toggle here reflects there (and vice versa) via the
+  // shared polls above — no local-only divergence. Optimistically apply the
+  // response so the button flips instantly; the poll reconciles either way.
+  const [opBusy, setOpBusy] = useState(false)
+
+  const toggleArm = async () => {
+    if (opBusy) return
+    setOpBusy(true)
+    try {
+      const res = ing.armed ? await disarmIngestion() : await armIngestion()
+      if (res?.data) setIng(res.data)
+    } catch { /* leave state as-is on failure */ } finally { setOpBusy(false) }
+  }
+
+  const toggleTrain = async () => {
+    if (opBusy) return
+    setOpBusy(true)
+    try {
+      const res = training ? await stopTraining() : await startTraining()
+      if (res?.data) {
+        setTraining(!!res.data.training)
+        if (res.data.queue_pending != null) setTrainQueue(Math.max(0, res.data.queue_pending))
+      }
+    } catch { /* leave state as-is on failure */ } finally { setOpBusy(false) }
+  }
 
   const pct = (v) => v == null ? '—' : `${Math.round(v * 100)}%`
   const num = (v) => (v ?? 0).toLocaleString()
@@ -333,6 +371,11 @@ export default function AfkStream() {
                } : { text: '—', color: 'var(--text-muted)', bg: '#ffffff08' }} />
 
         <div style={{ flex: 1 }} />
+        <OperatorControls
+          armed={ing.armed} training={training}
+          queued={Math.max(0, trainQueue || ing.queue_pending || 0)}
+          busy={opBusy} onArm={toggleArm} onTrain={toggleTrain}
+        />
         <ContactBadge />
         <div style={{ fontSize: 9, color: 'var(--text-muted)', letterSpacing: '0.08em', textAlign: 'center', marginTop: 10 }}>
           streaming · no interaction
@@ -420,6 +463,44 @@ function StatusTicker({ dot, text }) {
         marginLeft: 'auto', fontSize: 9.5, color: 'var(--text-muted)',
         letterSpacing: '0.14em', flexShrink: 0,
       }}>LIVE ACTIVITY</span>
+    </div>
+  )
+}
+
+// ── Operator controls ─────────────────────────────────────────────────────
+// Compact arm/training toggles for the operator, de-emphasized so they don't
+// compete with the stream. Backed by the same endpoints as the dashboard.
+function OperatorControls({ armed, training, queued, busy, onArm, onTrain }) {
+  const GREEN = C_CPU, PURPLE = '#8b5cf6'
+  const btn = (active, color) => ({
+    fontSize: 10.5, padding: '4px 9px', borderRadius: 6, fontFamily: MONO,
+    cursor: busy ? 'not-allowed' : 'pointer', fontWeight: 600, whiteSpace: 'nowrap',
+    color: active ? '#fff' : color,
+    background: active ? color : 'transparent',
+    border: `1px solid ${color}${active ? '' : '66'}`,
+  })
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap',
+      marginBottom: 10, opacity: 0.82,
+    }}>
+      <span style={{
+        fontSize: 8.5, fontWeight: 700, letterSpacing: '0.16em',
+        color: 'var(--text-muted)', marginRight: 1,
+      }}>OP</span>
+      <button onClick={onArm} disabled={busy} title="Arm / disarm ingestion"
+              style={btn(armed, GREEN)}>
+        {armed ? '● Armed' : '▶ Arm'}
+      </button>
+      <button onClick={onTrain} disabled={busy} title="Start / stop training mode"
+              style={btn(training, PURPLE)}>
+        {training ? '■ Training' : '🎓 Train'}
+      </button>
+      {queued > 0 && (
+        <span style={{
+          fontSize: 9.5, color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums',
+        }}>{queued.toLocaleString()} queued</span>
+      )}
     </div>
   )
 }
