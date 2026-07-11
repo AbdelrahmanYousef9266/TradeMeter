@@ -1,8 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import useStore from '../store'
 import {
-  getSystemStats, getTrainingStatus, getLSTMStatus, getIngestionStatus,
-  armIngestion, disarmIngestion, startTraining, stopTraining,
+  getSystemStats, getMode, getLSTMStatus, getIngestionStatus,
+  armIngestion, disarmIngestion, setModeLive, setModeOffline,
 } from '../services/api'
 import ArchitectureDiagram from '../components/ArchitectureDiagram'
 import SystemDesignDiagram from '../components/SystemDesignDiagram'
@@ -44,7 +44,8 @@ export default function AfkStream() {
   const { modelSignals, modelLevels, modelPnl, lastBarAt, currentBar } = useStore()
 
   const [sys, setSys]           = useState({ cpu_percent: 0, ram_used_gb: 0, ram_total_gb: 0, ram_percent: 0 })
-  const [training, setTraining] = useState(false)
+  const [mode, setMode]         = useState('live')
+  const training = mode === 'offline'   // OFFLINE mode == the old training mode
   const [trainQueue, setTrainQueue] = useState(0)
   const [lstm, setLstm]         = useState(null)
   const [ing, setIng]           = useState({ armed: false, queue_pending: 0 })
@@ -62,12 +63,12 @@ export default function AfkStream() {
     return () => { active = false; clearInterval(id) }
   }, [])
 
-  // ── Poll training status every 2s (drives Task + AI Status + narration) ──
+  // ── Poll system MODE every 2s (drives Task + AI Status + narration) ──────
   useEffect(() => {
     let active = true
-    const poll = () => getTrainingStatus().then(r => {
+    const poll = () => getMode().then(r => {
       if (!active) return
-      setTraining(!!r.data?.training)
+      setMode(r.data?.mode === 'offline' ? 'offline' : 'live')
       setTrainQueue(Math.max(0, r.data?.queue_pending ?? 0))   // never negative
     }).catch(() => {})
     poll()
@@ -258,16 +259,16 @@ export default function AfkStream() {
     const remaining = Math.max(0, trainQueue)
     if (training && remaining > 0) {
       const ctx = [year, inst].filter(Boolean).join(' ')
-      return { dot: PURPLE, text: `📥 Ingesting ${ctx ? ctx + ' ' : ''}data — ${remaining.toLocaleString()} bars remaining` }
+      return { dot: PURPLE, text: `📚 Offline — training on ${ctx ? ctx + ' ' : ''}history · ${remaining.toLocaleString()} bars remaining` }
     }
-    // 3. Training mode armed, queue empty — waiting for the blast.
+    // 3. Offline mode, queue empty — waiting for the historical blast.
     if (training) {
-      return { dot: AMBER, text: '🎓 Training mode armed — waiting for historical bars' }
+      return { dot: PURPLE, text: '📚 Offline mode — training on history (live models untouched)' }
     }
     // 4. Live — armed and bars flowing recently.
     if (ing.armed && dataFlowing) {
       const t = currentBar?.time ? hhmm(currentBar.time) : null
-      return { dot: GREEN, text: `📡 Live — watching ${inst || 'the market'} for signals${t ? ` · last bar ${t} ET` : ''}` }
+      return { dot: GREEN, text: `🟢 Live — watching ${inst || 'the market'} for signals${t ? ` · last bar ${t} ET` : ''}` }
     }
     // 5. Armed but no recent bars.
     if (ing.armed) {
@@ -278,10 +279,10 @@ export default function AfkStream() {
   }, [lstm, lstmDoneAt, now, training, trainQueue, ing, dataFlowing, currentBar, symbol])
 
   // ── Operator controls — same endpoints/state as the dashboard components ──
-  // These write the same backend flags the dashboard's IngestionControl /
-  // TrainingMode use, so a toggle here reflects there (and vice versa) via the
-  // shared polls above — no local-only divergence. Optimistically apply the
-  // response so the button flips instantly; the poll reconciles either way.
+  // These hit the same backend the dashboard's IngestionControl (arm gate) and
+  // ModeBanner (mode switch) use, so a toggle here reflects there (and vice
+  // versa) via the shared polls above — no local-only divergence. Optimistically
+  // apply the response so the button flips instantly; the poll reconciles either way.
   const [opBusy, setOpBusy] = useState(false)
 
   const toggleArm = async () => {
@@ -293,13 +294,21 @@ export default function AfkStream() {
     } catch { /* leave state as-is on failure */ } finally { setOpBusy(false) }
   }
 
-  const toggleTrain = async () => {
+  // Switch system mode. On stream there's no dialog, so if the queue isn't
+  // drained (backend 409) we flush-and-switch — a deliberate operator action.
+  const toggleMode = async () => {
     if (opBusy) return
     setOpBusy(true)
+    const call = training ? setModeLive : setModeOffline
     try {
-      const res = training ? await stopTraining() : await startTraining()
+      let res
+      try { res = await call(false) }
+      catch (e) {
+        if (e.response?.status === 409) res = await call(true)   // flush & switch
+        else throw e
+      }
       if (res?.data) {
-        setTraining(!!res.data.training)
+        setMode(res.data.mode === 'offline' ? 'offline' : 'live')
         if (res.data.queue_pending != null) setTrainQueue(Math.max(0, res.data.queue_pending))
       }
     } catch { /* leave state as-is on failure */ } finally { setOpBusy(false) }
@@ -373,9 +382,9 @@ export default function AfkStream() {
 
         <div style={{ flex: 1 }} />
         <OperatorControls
-          armed={ing.armed} training={training}
+          armed={ing.armed} offline={training}
           queued={Math.max(0, trainQueue || ing.queue_pending || 0)}
-          busy={opBusy} onArm={toggleArm} onTrain={toggleTrain}
+          busy={opBusy} onArm={toggleArm} onMode={toggleMode}
         />
         <ContactBadge />
         <div style={{ fontSize: 9, color: 'var(--text-muted)', letterSpacing: '0.08em', textAlign: 'center', marginTop: 10 }}>
@@ -476,7 +485,7 @@ function StatusTicker({ dot, text }) {
 // ── Operator controls ─────────────────────────────────────────────────────
 // Compact arm/training toggles for the operator, de-emphasized so they don't
 // compete with the stream. Backed by the same endpoints as the dashboard.
-function OperatorControls({ armed, training, queued, busy, onArm, onTrain }) {
+function OperatorControls({ armed, offline, queued, busy, onArm, onMode }) {
   const GREEN = C_CPU, PURPLE = '#8b5cf6'
   const btn = (active, color) => ({
     fontSize: 10.5, padding: '4px 9px', borderRadius: 6, fontFamily: MONO,
@@ -494,13 +503,14 @@ function OperatorControls({ armed, training, queued, busy, onArm, onTrain }) {
         fontSize: 8.5, fontWeight: 700, letterSpacing: '0.16em',
         color: 'var(--text-muted)', marginRight: 1,
       }}>OP</span>
-      <button onClick={onArm} disabled={busy} title="Arm / disarm ingestion"
+      <button onClick={onArm} disabled={busy} title="Arm / disarm ingestion (orthogonal to mode)"
               style={btn(armed, GREEN)}>
         {armed ? '● Armed' : '▶ Arm'}
       </button>
-      <button onClick={onTrain} disabled={busy} title="Start / stop training mode"
-              style={btn(training, PURPLE)}>
-        {training ? '■ Training' : '🎓 Train'}
+      {/* Mode toggle — shows the CURRENT mode; click switches (flushes if queued). */}
+      <button onClick={onMode} disabled={busy} title="Switch LIVE ⇄ OFFLINE (flushes the queue if needed)"
+              style={btn(offline, PURPLE)}>
+        {offline ? '📚 Offline' : '🟢 Live'}
       </button>
       {queued > 0 && (
         <span style={{

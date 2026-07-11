@@ -21,14 +21,18 @@ export const getNTToken        = ()           => api.get('/auth/nt-token')
 export const resetNTToken      = ()           => api.post('/auth/nt-token/reset')
 export const logout            = ()           => api.post('/auth/logout')
 
-export const getModels         = ()           => api.get('/models')
-export const getModelLevel     = (name, timeframe = '5min') => api.get(`/models/${name}/level`, { params: { timeframe } })
-export const getModelSettings  = (name, timeframe = '5min') => api.get(`/models/${name}/settings`, { params: { timeframe } })
-export const updateModelSettings = (name, d, timeframe = '5min') => api.put(`/models/${name}/settings`, d, { params: { timeframe } })
-export const resetModel        = (name, timeframe = '5min') => api.post(`/models/${name}/reset`, null, { params: { timeframe } })
-export const getLeaderboardPnl = ()           => api.get('/models/leaderboard')
-export const getLeaderboardLvl = ()           => api.get('/models/leaderboard/levels')
+export const getModels         = (context = 'live') => api.get('/models', { params: { context } })
+export const getModelLevel     = (name, timeframe = '5min', context = 'live') => api.get(`/models/${name}/level`, { params: { timeframe, context } })
+export const getModelSettings  = (name, timeframe = '5min', context = 'live') => api.get(`/models/${name}/settings`, { params: { timeframe, context } })
+export const updateModelSettings = (name, d, timeframe = '5min', context = 'live') => api.put(`/models/${name}/settings`, d, { params: { timeframe, context } })
+export const resetModel        = (name, timeframe = '5min', context = 'live') => api.post(`/models/${name}/reset`, null, { params: { timeframe, context } })
+export const getLeaderboardPnl = (context = 'live') => api.get('/models/leaderboard', { params: { context } })
+export const getLeaderboardLvl = (context = 'live') => api.get('/models/leaderboard/levels', { params: { context } })
 export const getModelHistory   = (name, p)   => api.get(`/models/${name}/history`, { params: p })
+
+// Promotion — the ONLY path from offline-trained weights to live trading
+export const getPromotionPreview  = (timeframe = 'all') => api.get('/models/promotion-preview', { params: { timeframe } })
+export const promoteOfflineToLive = (timeframe = 'all') => api.post('/models/promote', { timeframe, confirm: 'PROMOTE' })
 
 export const getHistory            = (params) => api.get('/market/history',      { params })
 export const getMarketStatus       = ()       => api.get('/market/status')
@@ -38,7 +42,7 @@ export const getDataSummary        = (timeframe = '1min')         => api.get('/m
 export const getDataDays           = (month, timeframe = '1min')  => api.get('/market/data-days', { params: { month, timeframe } })
 export const getDataIntegrity      = (timeframe = '1min')         => api.get('/market/data-integrity', { params: { timeframe } })
 export const getPredictionsHistory = (params) => api.get('/predictions/history', { params })
-export const getLatestPredictions  = (timeframe = '5min') => api.get('/predictions/latest', { params: { timeframe } })
+export const getLatestPredictions  = (timeframe = '5min', context = 'live') => api.get('/predictions/latest', { params: { timeframe, context } })
 
 export const getCCStatus    = ()     => api.get('/cc')
 export const getModelCC     = (name) => api.get(`/cc/${name}`)
@@ -48,7 +52,14 @@ export const forceEvaluation = (name) => api.post(`/cc/${name}/evaluate`)
 export const getLSTMStatus = () => api.get('/models/lstm/status')
 export const trainLSTM     = () => api.post('/models/lstm/train')
 
-// Training Mode — replay historical data to train the models
+// System MODE — the source of truth for ONLINE (live) vs OFFLINE (training on
+// history). Switching requires a drained queue; pass flush=true to flush-and-switch
+// (the backend returns 409 otherwise).
+export const getMode        = ()              => api.get('/mode')
+export const setModeLive    = (flush = false) => api.post('/mode/live',    { flush })
+export const setModeOffline = (flush = false) => api.post('/mode/offline', { flush })
+
+// Training Mode — thin aliases over the mode switch (offline == old training mode)
 export const startTraining     = () => api.post('/training/start')
 export const stopTraining      = () => api.post('/training/stop')
 export const getTrainingStatus = () => api.get('/training/status')

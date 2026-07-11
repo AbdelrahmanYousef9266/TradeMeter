@@ -4,7 +4,7 @@ import { usePredictions } from '../hooks/usePredictions'
 import Leaderboard   from '../components/dashboard/Leaderboard'
 import ModelCard      from '../components/dashboard/ModelCard'
 import LSTMCard       from '../components/dashboard/LSTMCard'
-import TrainingMode   from '../components/dashboard/TrainingMode'
+import ModeBanner     from '../components/dashboard/ModeBanner'
 import IngestionControl from '../components/dashboard/IngestionControl'
 import TradeSignalPanel from '../components/dashboard/TradeSignalPanel'
 import LevelUpToast    from '../components/dashboard/LevelUpToast'
@@ -89,6 +89,7 @@ export default function Dashboard() {
 
   const navigate = useNavigate()
   const { modelSignals, modelLevels, barHistory, user } = useStore()
+  const offline = useStore(s => s.mode === 'offline')
 
   // Post-login landing: show the Connect choice screen ONCE per session if NT is
   // not connected. It is a one-shot (sessionStorage) decision, NOT a guard — after
@@ -141,20 +142,28 @@ export default function Dashboard() {
         </nav>
       </header>
 
-      {/* Ingestion arm gate — decides when strategy bars enter the pipeline */}
+      {/* MODE indicator + switch (LIVE / OFFLINE) — replaces training banner */}
+      <ModeBanner />
+
+      {/* Ingestion arm gate — orthogonal: decides WHEN bars enter the pipeline */}
       <IngestionControl />
 
-      {/* Training Mode control + banner */}
-      <TrainingMode />
-
-      {/* One clear, actionable trade plan from the leading model */}
+      {/* Live: actionable trade plan. Offline: a clear "not a live signal" note. */}
       <div style={{ marginBottom: 12 }}>
-        <TradeSignalPanel />
+        {offline ? <OfflineNote /> : <TradeSignalPanel />}
       </div>
 
       {/* Chart timeframe toggle + live chart */}
       <ChartTimeframeToggle />
       <LiveChart bars={barHistory} style={{ marginBottom: 12 }} />
+
+      {/* When OFFLINE, the models/leaderboard below show the TRAINING COPY, not
+          live — wrap them in an unmistakable purple-tinted frame. */}
+      {offline && <OfflineContextHeader />}
+      <div style={offline ? {
+        border: '1px solid #7c5cff55', borderRadius: 12, padding: '10px 10px 4px',
+        background: '#7c5cff0a', marginBottom: 12,
+      } : undefined}>
 
       {/* Leaderboard (all 19 models, both timeframes, tagged) */}
       <Leaderboard style={{ marginBottom: 12 }} />
@@ -189,9 +198,45 @@ export default function Dashboard() {
           </div>
         </div>
       ))}
+      </div>{/* /offline frame */}
 
       {/* Single coalescing level-up / CC-promotion toast — fixed bottom-right */}
       <LevelUpToast />
+    </div>
+  )
+}
+
+// Shown above the model grid in OFFLINE mode so the training copy is never
+// mistaken for live trading.
+function OfflineContextHeader() {
+  const p = useStore(s => s.offlineProgress)
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, margin: '2px 2px 8px',
+      fontSize: 12, fontWeight: 600, color: '#7c5cff', letterSpacing: '0.04em',
+    }}>
+      <span>📚 OFFLINE — training copy, not live</span>
+      <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-muted)' }}>
+        watching the offline models learn from history
+        {p?.processed > 0 ? ` · ${p.processed.toLocaleString()} bars processed` : ''}
+      </span>
+    </div>
+  )
+}
+
+// Replaces the Trade Signal panel in OFFLINE mode — an offline model's signal is
+// not an actionable live call.
+function OfflineNote() {
+  return (
+    <div style={{
+      padding: '14px 18px', borderRadius: 12,
+      background: '#7c5cff10', border: '1px solid #7c5cff44', borderLeft: '4px solid #7c5cff',
+      fontSize: 13, color: 'var(--text-secondary)',
+    }}>
+      <b style={{ color: '#7c5cff' }}>📚 Offline training in progress.</b>{' '}
+      Your live models are untouched and still hold their current weights. Review the training
+      results below, then use <b>Promote offline → live</b> when you're satisfied — nothing goes
+      live automatically.
     </div>
   )
 }

@@ -70,6 +70,31 @@ const useStore = create((set) => ({
   chartTimeframe: '5min',
   setChartTimeframe: (tf) => set({ chartTimeframe: tf, barHistory: [], currentBar: null }),
 
+  // ── System MODE + displayed context ───────────────────────────────────────
+  // mode is the backend's per-user LIVE|OFFLINE state (polled from GET /mode).
+  // displayContext is which model set the dashboard shows: 'live' in LIVE mode,
+  // 'offline' in OFFLINE mode (so you can watch a training run). The model maps
+  // above hold ONE context at a time — switching context CLEARS them so offline
+  // data never renders on a live card or vice versa. WS/poll updates carrying a
+  // different context are dropped (see useWebSocket + usePredictions).
+  mode: 'live',
+  displayContext: 'live',
+  setMode: (mode) => set(state => {
+    if (state.mode === mode) return {}
+    return {
+      mode,
+      displayContext: mode === 'offline' ? 'offline' : 'live',
+      // Purge the other context's cards so the two never mix.
+      modelSignals: {}, modelLevels: {}, modelPnl: {},
+      leaderboardPnl: [], leaderboardLevels: [],
+    }
+  }),
+
+  // Offline training progress (from WS "training_progress" batches): bars
+  // processed this run + queue depth. Drives the offline banner.
+  offlineProgress: { processed: 0, queuePending: 0 },
+  setOfflineProgress: (p) => set(state => ({ offlineProgress: { ...state.offlineProgress, ...p } })),
+
   // Leaderboard data
   leaderboardPnl:    [],
   leaderboardLevels: [],

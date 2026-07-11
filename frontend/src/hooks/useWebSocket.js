@@ -73,7 +73,7 @@ export function useWebSocket(enabled = true) {
   const ws = useRef(null)
   const reconnectDelay = useRef(1000)
   const isMounted = useRef(false)
-  const { setBar, setCurrentBar, updateModelSignal, updateModelLevel, updateModelPnl, pushLevelUp, setNtConnected, setWarmup } = useStore()
+  const { setBar, setCurrentBar, updateModelSignal, updateModelLevel, updateModelPnl, pushLevelUp, setNtConnected, setWarmup, setOfflineProgress } = useStore()
 
   useEffect(() => {
     // Only connect when enabled (e.g. authenticated). When disabled this hook
@@ -100,17 +100,21 @@ export function useWebSocket(enabled = true) {
         try {
           const msg = JSON.parse(e.data)
 
-          // Each message names its series; default to the primary (5-min).
-          const tf = msg.timeframe || '5min'
-          const chartTf = useStore.getState().chartTimeframe
+          // Each message names its series + context; default to primary/live.
+          const tf  = msg.timeframe || '5min'
+          const ctx = msg.context   || 'live'
+          const { chartTimeframe: chartTf, displayContext } = useStore.getState()
+          // Only apply model/chart updates that match the currently-DISPLAYED
+          // context, so an offline (training) bar never lands on a live card and
+          // vice versa. Mode switches clear the maps (store.setMode).
+          const ctxMatches = ctx === displayContext
 
           if (msg.type === 'tick') {
             // Real-time price update (inter-bar tick or warmup bar close). Only the
-            // chart's selected timeframe drives the price line, so the two series
-            // don't fight over the live candle.
-            if (tf === chartTf) setCurrentBar({ time: msg.time, ...msg.bar })
+            // chart's selected timeframe + displayed context drives the price line.
+            if (tf === chartTf && ctxMatches) setCurrentBar({ time: msg.time, ...msg.bar })
             // Warmup progress is embedded in tick messages during the 50-bar warmup.
-            if (msg.warmup?.warming_up && tf === chartTf) {
+            if (msg.warmup?.warming_up && tf === chartTf && ctxMatches) {
               setWarmup({
                 barsReceived: msg.warmup.bars_received,
                 barsNeeded:   msg.warmup.bars_needed,
@@ -120,7 +124,7 @@ export function useWebSocket(enabled = true) {
             }
           }
 
-          if (msg.type === 'bar') {
+          if (msg.type === 'bar' && ctxMatches) {
             // Model cards update for BOTH series (keyed by timeframe); the chart
             // candle is appended only for the selected chart timeframe.
             if (tf === chartTf) {
@@ -136,6 +140,11 @@ export function useWebSocket(enabled = true) {
             if (msg.session_pnl) {
               Object.entries(msg.session_pnl).forEach(([name, pnl]) => updateModelPnl(name, pnl, tf))
             }
+          }
+
+          // Offline bulk-import progress (throttled per batch, no per-bar cards).
+          if (msg.type === 'training_progress') {
+            setOfflineProgress({ processed: msg.processed ?? 0, queuePending: Math.max(0, msg.queue_pending ?? 0) })
           }
 
           if (msg.type === 'level_up') pushLevelUp(msg)
