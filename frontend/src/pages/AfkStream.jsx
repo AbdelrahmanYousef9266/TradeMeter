@@ -5,6 +5,7 @@ import {
   armIngestion, disarmIngestion, startTraining, stopTraining,
 } from '../services/api'
 import ArchitectureDiagram from '../components/ArchitectureDiagram'
+import SystemDesignDiagram from '../components/SystemDesignDiagram'
 import LeaderboardRace from '../components/LeaderboardRace'
 import TradeSignalPanel from '../components/dashboard/TradeSignalPanel'
 
@@ -419,13 +420,18 @@ export default function AfkStream() {
             padding: '10px 16px', borderBottom: '1px solid #1e2127', flexShrink: 0,
             fontFamily: MONO,
           }}>
-            <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.04em' }}>System Architecture</span>
+            <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.04em' }}>System Design &amp; Architecture</span>
             <span style={{ fontSize: 9.5, color: 'var(--text-muted)', letterSpacing: '0.08em' }}>
-              LIVE DATA FLOW · LEARNING LOOP
+              DEPLOYMENT · DATA FLOW
             </span>
           </div>
-          <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 10 }}>
-            <ArchitectureDiagram compact />
+          <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, padding: 10 }}>
+            <div style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
+              <SystemDesignDiagram compact />
+            </div>
+            <div style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'flex-start' }}>
+              <ArchitectureDiagram compact />
+            </div>
           </div>
         </div>
       </main>

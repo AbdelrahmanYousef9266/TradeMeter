@@ -23,6 +23,7 @@ import asyncpg
 import redis.asyncio as aioredis
 
 from app.core.config import settings
+from app.services.market_data.features import get_et_time
 from app.services.ml.models.base import ModelPrediction, ml_features
 from app.services.ml.models.scalper       import ScalperModel
 from app.services.ml.models.momentum      import MomentumModel
@@ -136,7 +137,45 @@ class MLPipeline:
         self._pending_champion:   list[dict] = []
         self._pending_challenger: list[dict] = []
 
+        # ET calendar date of the last bar seen — used to detect an RTH session
+        # rollover so each model's per-session signal budget is cleared once a day
+        # (see _maybe_reset_session). Without this the max_signals_per_session cap,
+        # once hit, never reset and every later bar force-HOLD'd.
+        self._last_session_date = None
+
         self.bar_count = 0
+
+    # ── Per-session signal-budget reset ─────────────────────────────────────
+
+    def _maybe_reset_session(self, bar_time: object) -> None:
+        """
+        Clear every model's per-session signal counter when a new RTH session
+        (ET calendar day) begins. The models expose reset_session() for exactly
+        this, but nothing was wired to call it — so a model that spent its
+        max_signals_per_session budget stayed capped for the rest of the run,
+        emitting HOLD at full confidence forever. Detect the ET date changing and
+        reset the budget on the Champion, Challenger, and personal models.
+        """
+        if bar_time is None:
+            return
+        try:
+            d = get_et_time(bar_time).date()
+        except Exception:
+            return
+        if self._last_session_date is None:
+            self._last_session_date = d
+            return
+        if d == self._last_session_date:
+            return
+        self._last_session_date = d
+        for cc in self.cc_models.values():
+            for model_obj in (cc._champion_model_obj, cc._challenger_model_obj):
+                reset = getattr(model_obj, "reset_session", None)
+                if callable(reset):
+                    reset()
+        reset_personal = getattr(self.personal, "reset_session", None)
+        if callable(reset_personal):
+            reset_personal()
 
     # ── Prediction ────────────────────────────────────────────────────────
 
@@ -158,6 +197,9 @@ class MLPipeline:
           filled at the *next* bar's open. A signal derived from a bar's close
           must never fill at that same bar's open.
         """
+        # Clear the per-session signal budget at the start of each new RTH day.
+        self._maybe_reset_session(bar_time)
+
         predictions: dict[str, ModelPrediction] = {}
 
         for name, cc in self.cc_models.items():

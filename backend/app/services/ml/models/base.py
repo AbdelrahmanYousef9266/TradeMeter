@@ -53,6 +53,25 @@ class BasePersonalityModel(ABC):
         self.bar_count      = 0
         self._session_signal_count = 0
 
+    # ── Pickle hooks ──────────────────────────────────────────────────────
+    #
+    # `_session_signal_count` is EPHEMERAL per-session runtime state (this RTH
+    # session's signal budget), not a learned weight. It must never ride along in
+    # the persisted model_state blob: doing so meant a model that hit its
+    # max_signals_per_session cap during a training reprocess came back from a
+    # restart already at the cap, and — because reset_session() is only called at
+    # a session boundary — force-HOLD'd every live bar (confidence 1.0 yet HOLD)
+    # until the next session rolled over. Always restore it at 0 so a fresh
+    # process starts each model with a full budget.
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        state["_session_signal_count"] = 0
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._session_signal_count = 0
+
     # ── Abstract ──────────────────────────────────────────────────────────
 
     @abstractmethod

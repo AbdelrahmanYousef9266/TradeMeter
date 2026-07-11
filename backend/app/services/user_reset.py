@@ -94,14 +94,26 @@ def purge_in_memory_state(user_id: str) -> None:
     from app.services.market_data.features import _engines
     from app.services.market_data import ingestion as ing
 
-    # All per-user registries are keyed by the canonical str(user_id); normalize
-    # here too so a UUID caller can't leave an un-purged entry behind.
     user_id = str(user_id)
+
+    # Phase 2 split the per-user pipeline/engine/bar-state/watermark registries
+    # into one entry PER (user_id, timeframe) — their keys are now tuples, so a
+    # plain registry.pop(user_id) matches nothing and silently leaves the old
+    # pipeline in memory to re-persist its levels/weights on the next bar (undoing
+    # the DB reset). Clear every timeframe for this user by matching the key's
+    # user_id element.
     for registry in (
         _pipelines, _pipeline_locks, _engines,
-        ing._bar_state, ing._last_bar_time,
+        ing._bar_state, ing._last_bar_time, ing._hist_save_accum,
+    ):
+        for k in [k for k in registry if isinstance(k, tuple) and k[0] == user_id]:
+            registry.pop(k, None)
+
+    # These registries remain keyed by the canonical str(user_id); normalize here
+    # too so a UUID caller can't leave an un-purged entry behind.
+    for registry in (
         ing._training_mode, ing._training_bar_count, ing._training_sessions,
-        ing._hist_reject_warn_at,
+        ing._hist_reject_warn_at, ing._ingestion_armed, ing._disarm_log_at,
     ):
         registry.pop(user_id, None)
     logger.info("Purged in-memory state for user %s", user_id)

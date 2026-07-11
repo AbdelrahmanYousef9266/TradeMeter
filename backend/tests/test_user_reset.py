@@ -111,22 +111,40 @@ def test_purge_in_memory_state_evicts_only_target_user():
     from app.services.market_data import ingestion as ing
 
     a, b = "user-a", "user-b"
-    registries = [
-        _pipelines, _pipeline_locks, _engines,
-        ing._bar_state, ing._last_bar_time,
-        ing._training_mode, ing._training_bar_count, ing._training_sessions,
-    ]
-    for reg in registries:
+
+    # Phase 2 keys the pipeline/engine/bar-state/watermark registries by
+    # (user_id, timeframe) — the purge must clear EVERY timeframe for the target
+    # user, so seed both 1-min and 5-min entries here.
+    tuple_registries = [_pipelines, _pipeline_locks, _engines,
+                        ing._bar_state, ing._last_bar_time]
+    # These stay keyed by the plain str(user_id).
+    str_registries = [ing._training_mode, ing._training_bar_count,
+                      ing._training_sessions]
+
+    for reg in tuple_registries:
+        for tf in ("1min", "5min"):
+            reg[(a, tf)] = "sentinel-a"
+            reg[(b, tf)] = "sentinel-b"
+    for reg in str_registries:
         reg[a] = "sentinel-a"
         reg[b] = "sentinel-b"
 
     try:
         purge_in_memory_state(a)
-        for reg in registries:
+        for reg in tuple_registries:
+            assert (a, "1min") not in reg and (a, "5min") not in reg, \
+                "every timeframe for the target user must be evicted"
+            assert reg[(b, "1min")] == "sentinel-b" and reg[(b, "5min")] == "sentinel-b", \
+                "other users must be preserved"
+        for reg in str_registries:
             assert a not in reg, "target user must be evicted"
             assert reg[b] == "sentinel-b", "other users must be preserved"
     finally:
-        for reg in registries:
+        for reg in tuple_registries:
+            for tf in ("1min", "5min"):
+                reg.pop((a, tf), None)
+                reg.pop((b, tf), None)
+        for reg in str_registries:
             reg.pop(a, None)
             reg.pop(b, None)
 

@@ -1,23 +1,30 @@
 /**
- * Animated architecture diagram — TradeMeter data flow + learning loop.
+ * Animated architecture diagram — TradeMeter dual-timeframe data flow (Phase 2).
  *
- * Self-contained: inline SVG + scoped CSS animations. Uses the app's CSS
- * variables so it adapts to the theme. The SVG markup is kept visually
- * identical to the standalone version at /architecture.html (only attribute
- * casing differs — JSX requires camelCase).
+ * Depicts the real system: two NinjaTrader charts (1-min + 5-min) → Redis →
+ * FastAPI, which fans out into TWO parallel pipelines. The 5-min pipeline is the
+ * primary (trading) series — 9 online models + LSTM (10) — and is emphasised in
+ * teal with a glow; the 1-min pipeline is context — 9 online models — in purple.
+ * Both persist per-timeframe to TimescaleDB + MLflow and feed the 19-model
+ * dashboard. 19 competitors total (9×1-min + 10×5-min).
  *
- * Animations use only stroke-dashoffset, opacity and transform (GPU-friendly)
- * and are gated behind prefers-reduced-motion so a static frame is shown when
- * the viewer opts out.
+ * Self-contained: inline SVG + scoped CSS animations, using the app's CSS
+ * variables so it adapts to the theme. The SVG markup is kept visually identical
+ * to the standalone version at /architecture.html (only attribute casing differs
+ * — JSX requires camelCase). Animations use only stroke-dashoffset, opacity and
+ * transform (GPU-friendly) and are gated behind prefers-reduced-motion.
+ *
+ * The diagram is right-aligned within its container (compact mode hugs the right
+ * edge so it sits on the right of the AFK panel / stream column).
  */
 export default function ArchitectureDiagram({ compact = false }) {
   return (
     <div style={{
       width: '100%',
-      maxWidth: compact ? '100%' : '680px',
+      maxWidth: compact ? '100%' : '720px',
       height: compact ? '100%' : 'auto',
-      margin: '0 auto',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      margin: '0 0 0 auto',                 // right-align within its container
+      display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
     }}>
       <style>{`
         @keyframes tm-dash { to { stroke-dashoffset: -16; } }
@@ -38,10 +45,10 @@ export default function ArchitectureDiagram({ compact = false }) {
         }
       `}</style>
 
-      <svg viewBox="0 0 680 700" width="100%" role="img"
-           preserveAspectRatio="xMidYMid meet"
+      <svg viewBox="0 0 720 660" width="100%" role="img"
+           preserveAspectRatio={compact ? 'xMaxYMid meet' : 'xMidYMid meet'}
            style={{ display: 'block', maxWidth: '100%', maxHeight: '100%', height: compact ? '100%' : 'auto' }}
-           aria-label="TradeMeter architecture: live bars flow from NinjaTrader through Redis, TimescaleDB and the feature engine into 11 ML models that predict, trade, learn and feed the dashboard.">
+           aria-label="TradeMeter dual-timeframe architecture: two NinjaTrader charts (1-min and 5-min) tag each bar's timeframe, flow through Redis and a timeframe-routing FastAPI backend into two parallel pipelines — a 1-min context pipeline of 9 online models and a primary 5-min pipeline of 9 online models plus an LSTM — then persist per timeframe to TimescaleDB and MLflow and feed the 19-model dashboard.">
         <defs>
           <marker id="tm-arrow" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -53,138 +60,110 @@ export default function ArchitectureDiagram({ compact = false }) {
           </filter>
         </defs>
 
-        {/* ══════════════ DATA FLOW ══════════════ */}
+        {/* ══════════════ DATA IN — two NinjaTrader charts ══════════════ */}
 
-        {/* NinjaTrader (key input node — glow) */}
-        <rect className="tm-glow" x="220" y="24" width="240" height="52" rx="11"
-              fill="none" stroke="#5271ff" strokeWidth="3" filter="url(#tm-soft)" />
-        <rect x="220" y="24" width="240" height="52" rx="11"
-              fill="var(--surface-2)" stroke="#5271ff" strokeWidth="1.5" />
-        <text x="340" y="46" textAnchor="middle" fontSize="13" fontWeight="600" fill="var(--text-primary)">NinjaTrader 8</text>
-        <text x="340" y="63" textAnchor="middle" fontSize="10" fill="var(--text-muted)">Live 1-min bars</text>
-
-        {/* NT → Redis */}
-        <line x1="340" y1="76" x2="340" y2="112" className="tm-flow" stroke="#5271ff" strokeWidth="2" markerEnd="url(#tm-arrow)" />
-        <text x="352" y="98" fontSize="9" fill="var(--text-muted)">TCP :5000</text>
-        <circle className="tm-bar" cx="340" cy="78" r="3" fill="#5271ff" style={{ ['--tm-dist']: '32px' }} />
-        <circle className="tm-bar" cx="340" cy="78" r="3" fill="#5271ff" style={{ ['--tm-dist']: '32px', animationDelay: '1.2s' }} />
-
-        {/* Redis */}
-        <rect x="220" y="112" width="240" height="52" rx="11"
-              fill="var(--surface-2)" stroke="#5271ff" strokeWidth="1.5" />
-        <text x="340" y="134" textAnchor="middle" fontSize="13" fontWeight="600" fill="var(--text-primary)">Redis Streams</text>
-        <text x="340" y="151" textAnchor="middle" fontSize="10" fill="var(--text-muted)">Token auth · crash-safe buffer</text>
-
-        {/* Redis → TimescaleDB / Feature Engine (split) */}
-        <line x1="330" y1="166" x2="200" y2="198" className="tm-flow" stroke="#5271ff" strokeWidth="2" markerEnd="url(#tm-arrow)" />
-        <line x1="350" y1="166" x2="480" y2="198" className="tm-flow" stroke="#7F77DD" strokeWidth="2" markerEnd="url(#tm-arrow)" />
-
-        {/* TimescaleDB */}
-        <rect x="70" y="200" width="250" height="56" rx="11"
-              fill="var(--surface-2)" stroke="#5271ff" strokeWidth="1.5" />
-        <text x="195" y="224" textAnchor="middle" fontSize="13" fontWeight="600" fill="var(--text-primary)">TimescaleDB</text>
-        <text x="195" y="241" textAnchor="middle" fontSize="10" fill="var(--text-muted)">Stores every bar</text>
-
-        {/* Feature Engine */}
-        <rect x="360" y="200" width="250" height="56" rx="11"
+        {/* 1-min chart (context — purple) */}
+        <rect x="55" y="24" width="270" height="52" rx="11"
               fill="var(--surface-2)" stroke="#7F77DD" strokeWidth="1.5" />
-        <text x="485" y="224" textAnchor="middle" fontSize="13" fontWeight="600" fill="var(--text-primary)">Feature Engine</text>
-        <text x="485" y="241" textAnchor="middle" fontSize="10" fill="var(--text-muted)">16 features per bar</text>
+        <text x="190" y="46" textAnchor="middle" fontSize="12.5" fontWeight="600" fill="var(--text-primary)">NinjaTrader · 1-min chart</text>
+        <text x="190" y="63" textAnchor="middle" fontSize="9.5" fill="var(--text-muted)">tags TIMEFRAME=1min</text>
 
-        {/* → Models (merge) */}
-        <line x1="195" y1="256" x2="330" y2="290" className="tm-flow" stroke="#5271ff" strokeWidth="2" markerEnd="url(#tm-arrow)" />
-        <line x1="485" y1="256" x2="350" y2="290" className="tm-flow" stroke="#7F77DD" strokeWidth="2" markerEnd="url(#tm-arrow)" />
+        {/* 5-min chart (primary — teal, glow) */}
+        <rect className="tm-glow" x="395" y="24" width="270" height="52" rx="11"
+              fill="none" stroke="#1D9E75" strokeWidth="3" filter="url(#tm-soft)" />
+        <rect x="395" y="24" width="270" height="52" rx="11"
+              fill="var(--surface-2)" stroke="#1D9E75" strokeWidth="2" />
+        <text x="530" y="46" textAnchor="middle" fontSize="12.5" fontWeight="700" fill="var(--text-primary)">NinjaTrader · 5-min chart</text>
+        <text x="530" y="63" textAnchor="middle" fontSize="9.5" fill="var(--text-muted)">tags TIMEFRAME=5min · primary</text>
 
-        {/* 11 ML models (key compute node — glow) */}
-        <rect className="tm-glow" x="60" y="292" width="560" height="104" rx="12"
-              fill="none" stroke="#7F77DD" strokeWidth="3" filter="url(#tm-soft)" />
-        <rect x="60" y="292" width="560" height="104" rx="12"
-              fill="var(--surface-2)" stroke="#7F77DD" strokeWidth="1.5" />
-        <text x="340" y="312" textAnchor="middle" fontSize="13" fontWeight="600" fill="var(--text-primary)">11 ML Models — predict in parallel</text>
-        <text x="340" y="327" textAnchor="middle" fontSize="10" fill="var(--text-muted)">8 River online-learners · Secret · Fantastic · Deep LSTM</text>
+        {/* Both charts → Redis (converge) */}
+        <line x1="190" y1="76" x2="300" y2="114" className="tm-flow" stroke="#7F77DD" strokeWidth="2" markerEnd="url(#tm-arrow)" />
+        <line x1="530" y1="76" x2="420" y2="114" className="tm-flow" stroke="#1D9E75" strokeWidth="2" markerEnd="url(#tm-arrow)" />
 
-        {/* Row 1 chips */}
-        <ModelChip x={86}  label="Scalper" />
-        <ModelChip x={172} label="Momentum" />
-        <ModelChip x={258} label="Mean Rev" />
-        <ModelChip x={344} label="Breakout" />
-        <ModelChip x={430} label="Conserv." />
-        <ModelChip x={516} label="Aggress." />
-        {/* Row 2 chips */}
-        <ModelChip x={129} y={364} label="Volume" />
-        <ModelChip x={215} y={364} label="Contrar." />
-        <ModelChip x={301} y={364} label="Secret" />
-        <ModelChip x={387} y={364} label="Fantastic" />
-        <ModelChip x={473} y={364} label="LSTM" />
+        {/* Redis Streams */}
+        <rect x="210" y="116" width="300" height="54" rx="11"
+              fill="var(--surface-2)" stroke="#5271ff" strokeWidth="1.5" />
+        <text x="360" y="138" textAnchor="middle" fontSize="12.5" fontWeight="600" fill="var(--text-primary)">TCP :5000 → Redis Streams</text>
+        <text x="360" y="156" textAnchor="middle" fontSize="9.5" fill="var(--text-muted)">arm gate · consumer groups</text>
 
-        {/* Models → Loop */}
-        <line x1="340" y1="396" x2="340" y2="424" className="tm-flow" stroke="#5271ff" strokeWidth="2" markerEnd="url(#tm-arrow)" />
-        <circle className="tm-bar" cx="340" cy="398" r="3" fill="#5271ff" style={{ ['--tm-dist']: '24px' }} />
+        {/* Redis → backend */}
+        <line x1="360" y1="170" x2="360" y2="196" className="tm-flow" stroke="#5271ff" strokeWidth="2" markerEnd="url(#tm-arrow)" />
+        <circle className="tm-bar" cx="360" cy="172" r="3" fill="#5271ff" style={{ ['--tm-dist']: '22px' }} />
+        <circle className="tm-bar" cx="360" cy="172" r="3" fill="#5271ff" style={{ ['--tm-dist']: '22px', animationDelay: '1.2s' }} />
 
-        {/* ══════════════ LEARNING LOOP ══════════════ */}
+        {/* FastAPI backend */}
+        <rect x="210" y="198" width="300" height="52" rx="11"
+              fill="var(--surface-2)" stroke="#5271ff" strokeWidth="1.5" />
+        <text x="360" y="220" textAnchor="middle" fontSize="12.5" fontWeight="600" fill="var(--text-primary)">FastAPI backend</text>
+        <text x="360" y="237" textAnchor="middle" fontSize="9.5" fill="var(--text-muted)">routes by timeframe</text>
 
-        {/* Container + glow overlay */}
-        <rect x="95" y="424" width="490" height="176" rx="14"
-              fill="var(--surface-2)" stroke="var(--border)" strokeWidth="1" />
-        <rect className="tm-glow" x="95" y="424" width="490" height="176" rx="14"
-              fill="none" stroke="#2dd4bf" strokeWidth="1.5" strokeDasharray="4 6" />
-        <text x="340" y="444" textAnchor="middle" fontSize="10" fontWeight="600"
-              letterSpacing="1.5" fill="#2dd4bf">LEARNING LOOP</text>
+        {/* Backend → split into two pipelines */}
+        <line x1="330" y1="250" x2="200" y2="286" className="tm-flow" stroke="#7F77DD" strokeWidth="2" markerEnd="url(#tm-arrow)" />
+        <line x1="390" y1="250" x2="520" y2="286" className="tm-flow" stroke="#1D9E75" strokeWidth="2" markerEnd="url(#tm-arrow)" />
 
-        {/* Predict */}
-        <rect x="135" y="452" width="170" height="48" rx="10"
-              fill="var(--bg)" stroke="var(--border-strong)" strokeWidth="1" />
-        <text x="220" y="472" textAnchor="middle" fontSize="12" fontWeight="600" fill="var(--text-primary)">Predict</text>
-        <text x="220" y="488" textAnchor="middle" fontSize="9" fill="var(--text-muted)">BUY · SELL · HOLD</text>
+        {/* ══════════════ LEFT — 1-min pipeline (context, purple) ══════════════ */}
+        <rect x="40" y="288" width="300" height="182" rx="14"
+              fill="var(--surface-2)" stroke="#7F77DD" strokeWidth="1.2" />
+        <text x="190" y="308" textAnchor="middle" fontSize="10" fontWeight="700" letterSpacing="1.2" fill="#7F77DD">1-MIN PIPELINE · CONTEXT</text>
 
-        {/* Open trade */}
-        <rect x="375" y="452" width="170" height="48" rx="10"
-              fill="var(--bg)" stroke="var(--border-strong)" strokeWidth="1" />
-        <text x="460" y="472" textAnchor="middle" fontSize="12" fontWeight="600" fill="var(--text-primary)">Open trade</text>
-        <text x="460" y="488" textAnchor="middle" fontSize="9" fill="var(--text-muted)">ATR stop &amp; target</text>
+        <rect x="60" y="316" width="260" height="40" rx="9" fill="var(--bg)" stroke="var(--border-strong)" strokeWidth="1" />
+        <text x="190" y="334" textAnchor="middle" fontSize="11" fontWeight="600" fill="var(--text-primary)">Feature engine</text>
+        <text x="190" y="348" textAnchor="middle" fontSize="9" fill="var(--text-muted)">16 features per bar</text>
+        <line x1="190" y1="356" x2="190" y2="364" className="tm-flow" stroke="#7F77DD" strokeWidth="1.5" markerEnd="url(#tm-arrow)" />
 
-        {/* Outcome */}
-        <rect x="375" y="524" width="170" height="48" rx="10"
-              fill="var(--bg)" stroke="var(--border-strong)" strokeWidth="1" />
-        <text x="460" y="544" textAnchor="middle" fontSize="12" fontWeight="600" fill="var(--text-primary)">Outcome</text>
-        <text x="460" y="560" textAnchor="middle" fontSize="9" fill="var(--text-muted)">Real P&amp;L · win / loss</text>
+        <rect x="60" y="366" width="260" height="40" rx="9" fill="var(--bg)" stroke="var(--border-strong)" strokeWidth="1" />
+        <text x="190" y="384" textAnchor="middle" fontSize="11" fontWeight="600" fill="var(--text-primary)">9 online models</text>
+        <text x="190" y="398" textAnchor="middle" fontSize="9" fill="var(--text-muted)">River online-learners</text>
+        <line x1="190" y1="406" x2="190" y2="414" className="tm-flow" stroke="#7F77DD" strokeWidth="1.5" markerEnd="url(#tm-arrow)" />
 
-        {/* Learn */}
-        <rect x="135" y="524" width="170" height="48" rx="10"
-              fill="var(--bg)" stroke="var(--border-strong)" strokeWidth="1" />
-        <text x="220" y="544" textAnchor="middle" fontSize="12" fontWeight="600" fill="var(--text-primary)">Learn</text>
-        <text x="220" y="560" textAnchor="middle" fontSize="9" fill="var(--text-muted)">.learn_one → weights</text>
+        <rect x="60" y="416" width="260" height="42" rx="9" fill="var(--bg)" stroke="var(--border-strong)" strokeWidth="1" />
+        <text x="190" y="435" textAnchor="middle" fontSize="10.5" fontWeight="600" fill="var(--text-primary)">predict → trade → learn</text>
+        <text x="190" y="449" textAnchor="middle" fontSize="9" fill="#7F77DD">↻ continuous loop</text>
 
-        {/* Loop arrows (clockwise) */}
-        <line x1="307" y1="470" x2="373" y2="470" className="tm-loop" stroke="#2dd4bf" strokeWidth="2" markerEnd="url(#tm-arrow)" />
-        <line x1="460" y1="502" x2="460" y2="522" className="tm-loop" stroke="#fbbf24" strokeWidth="2" markerEnd="url(#tm-arrow)" />
-        <line x1="373" y1="554" x2="307" y2="554" className="tm-loop" stroke="#E24B4A" strokeWidth="2" markerEnd="url(#tm-arrow)" />
-        <line x1="220" y1="522" x2="220" y2="502" className="tm-loop" stroke="#7F77DD" strokeWidth="2" markerEnd="url(#tm-arrow)" />
-        <text x="150" y="514" fontSize="9" fill="#7F77DD">↺ improve</text>
+        {/* ══════════════ RIGHT — 5-min pipeline (primary, teal, glow) ══════════════ */}
+        <rect className="tm-glow" x="380" y="288" width="300" height="182" rx="14"
+              fill="none" stroke="#1D9E75" strokeWidth="2.5" filter="url(#tm-soft)" />
+        <rect x="380" y="288" width="300" height="182" rx="14"
+              fill="var(--surface-2)" stroke="#1D9E75" strokeWidth="2" />
+        <text x="530" y="308" textAnchor="middle" fontSize="10" fontWeight="700" letterSpacing="1.2" fill="#1D9E75">5-MIN PIPELINE · PRIMARY</text>
 
-        {/* Loop → Dashboard */}
-        <line x1="340" y1="600" x2="340" y2="628" className="tm-flow" stroke="#5271ff" strokeWidth="2" markerEnd="url(#tm-arrow)" />
-        <circle className="tm-bar" cx="340" cy="602" r="3" fill="#5271ff" style={{ ['--tm-dist']: '24px' }} />
+        <rect x="400" y="316" width="260" height="40" rx="9" fill="var(--bg)" stroke="var(--border-strong)" strokeWidth="1" />
+        <text x="530" y="334" textAnchor="middle" fontSize="11" fontWeight="600" fill="var(--text-primary)">Feature engine</text>
+        <text x="530" y="348" textAnchor="middle" fontSize="9" fill="var(--text-muted)">16 features per bar</text>
+        <line x1="530" y1="356" x2="530" y2="364" className="tm-flow" stroke="#1D9E75" strokeWidth="1.5" markerEnd="url(#tm-arrow)" />
 
-        {/* Dashboard (key output node — glow) */}
-        <rect className="tm-glow" x="200" y="628" width="280" height="54" rx="11"
+        <rect x="400" y="366" width="260" height="40" rx="9" fill="var(--bg)" stroke="var(--border-strong)" strokeWidth="1" />
+        <text x="530" y="384" textAnchor="middle" fontSize="11" fontWeight="600" fill="var(--text-primary)">9 online + LSTM = 10 models</text>
+        <text x="530" y="398" textAnchor="middle" fontSize="9" fill="var(--text-muted)">River online-learners · Deep LSTM</text>
+        <line x1="530" y1="406" x2="530" y2="414" className="tm-flow" stroke="#1D9E75" strokeWidth="1.5" markerEnd="url(#tm-arrow)" />
+
+        <rect x="400" y="416" width="260" height="42" rx="9" fill="var(--bg)" stroke="var(--border-strong)" strokeWidth="1" />
+        <text x="530" y="435" textAnchor="middle" fontSize="10.5" fontWeight="600" fill="var(--text-primary)">predict → trade → learn</text>
+        <text x="530" y="449" textAnchor="middle" fontSize="9" fill="#1D9E75">↻ continuous loop</text>
+
+        {/* Both pipelines → TimescaleDB + MLflow (converge) */}
+        <line x1="190" y1="470" x2="300" y2="504" className="tm-flow" stroke="#7F77DD" strokeWidth="2" markerEnd="url(#tm-arrow)" />
+        <line x1="530" y1="470" x2="420" y2="504" className="tm-flow" stroke="#1D9E75" strokeWidth="2" markerEnd="url(#tm-arrow)" />
+
+        {/* TimescaleDB + MLflow */}
+        <rect x="210" y="506" width="300" height="54" rx="11"
+              fill="var(--surface-2)" stroke="#5271ff" strokeWidth="1.5" />
+        <text x="360" y="528" textAnchor="middle" fontSize="12.5" fontWeight="600" fill="var(--text-primary)">TimescaleDB + MLflow</text>
+        <text x="360" y="546" textAnchor="middle" fontSize="9.5" fill="var(--text-muted)">bars · weights · levels — per timeframe</text>
+
+        {/* DB → Dashboard */}
+        <line x1="360" y1="560" x2="360" y2="586" className="tm-flow" stroke="#5271ff" strokeWidth="2" markerEnd="url(#tm-arrow)" />
+        <circle className="tm-bar" cx="360" cy="562" r="3" fill="#5271ff" style={{ ['--tm-dist']: '22px' }} />
+        <circle className="tm-bar" cx="360" cy="562" r="3" fill="#5271ff" style={{ ['--tm-dist']: '22px', animationDelay: '1.2s' }} />
+
+        {/* React dashboard (output — glow) */}
+        <rect className="tm-glow" x="210" y="588" width="300" height="54" rx="11"
               fill="none" stroke="#2dd4bf" strokeWidth="3" filter="url(#tm-soft)" />
-        <rect x="200" y="628" width="280" height="54" rx="11"
+        <rect x="210" y="588" width="300" height="54" rx="11"
               fill="var(--surface-2)" stroke="#2dd4bf" strokeWidth="1.5" />
-        <text x="340" y="651" textAnchor="middle" fontSize="13" fontWeight="600" fill="var(--text-primary)">Dashboard</text>
-        <text x="340" y="668" textAnchor="middle" fontSize="10" fill="var(--text-muted)">WebSocket · signals · P&amp;L · levels</text>
+        <text x="360" y="610" textAnchor="middle" fontSize="12.5" fontWeight="600" fill="var(--text-primary)">React dashboard · WebSocket</text>
+        <text x="360" y="628" textAnchor="middle" fontSize="9.5" fill="var(--text-muted)">19 models · combined leaderboard</text>
       </svg>
     </div>
-  )
-}
-
-// Small rounded model chip inside the "11 models" container.
-function ModelChip({ x, y = 340, label }) {
-  return (
-    <g>
-      <rect x={x} y={y} width="78" height="18" rx="5"
-            fill="var(--bg)" stroke="var(--border-strong)" strokeWidth="0.75" />
-      <text x={x + 39} y={y + 13} textAnchor="middle" fontSize="9" fill="var(--text-primary)">{label}</text>
-    </g>
   )
 }

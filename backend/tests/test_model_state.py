@@ -78,6 +78,14 @@ async def test_save_and_restore_preserves_predictions():
     n = restored.restore_state(saved)
     assert n == 9   # 8 personality + personal
 
+    # The per-session signal budget (`_session_signal_count`) is intentionally
+    # NOT persisted — a restored model always comes back with a fresh budget (see
+    # BasePersonalityModel.__setstate__). Clear it on the original too so this
+    # check compares the LEARNED WEIGHTS, not the ephemeral gate that would
+    # otherwise make a capped original HOLD while the fresh restore fires.
+    for cc in original.cc_models.values():
+        cc._champion_model_obj.reset_session()
+
     # Champion predictions must match the trained pipeline exactly
     for name, cc in original.cc_models.items():
         p_orig = cc.predict(FEATS, 5900.0)
