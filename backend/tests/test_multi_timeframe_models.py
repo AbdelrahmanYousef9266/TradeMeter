@@ -89,10 +89,10 @@ class _CaptureConn:
 
     async def execute(self, q, *a):
         if "INTO model_state" in q:
-            _uid, name, tf, blob, _bars = a
+            _uid, name, tf, _ctx, blob, _bars = a
             self.state[(name, tf)] = blob
         elif "INTO model_levels" in q:
-            _uid, name, tf, level, *_ = a
+            _uid, name, tf, _ctx, level, *_ = a
             self.levels[(name, tf)] = level
 
     async def fetch(self, q, *a):

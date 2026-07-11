@@ -83,8 +83,9 @@ def _hist_fields():
 def _clean_state():
     regs = (
         ingestion._last_bar_time, ingestion._bar_state,
-        ingestion._training_mode, ingestion._training_bar_count,
+        ingestion._system_mode, ingestion._training_bar_count,
         ingestion._training_sessions, ingestion._hist_reject_warn_at,
+        ingestion._mode_reject_at, ingestion._warmed_engines,
     )
     for d in regs:
         d.clear()
@@ -123,14 +124,14 @@ async def test_hist_bar_accepted_and_tagged_when_training_on():
 
 @pytest.mark.asyncio
 async def test_hist_reject_warning_is_rate_limited(monkeypatch):
-    """A 23k-bar blast with training off must not emit 23k warning logs."""
+    """A 23k-bar blast in the wrong mode must not emit 23k refusal logs."""
     calls = []
-    monkeypatch.setattr(ingestion.logger, "warning", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(ingestion.logger, "info", lambda *a, **k: calls.append(a))
 
-    pool, redis = _Pool(), _Redis()
+    pool, redis = _Pool(), _Redis()   # default mode is LIVE → hist bars refused
     for _ in range(100):
         await _process_entry(_hist_fields(), pool, redis)
 
-    # Throttled to a single warning for the burst (same user, within interval).
+    # Throttled to a single refusal log for the burst (same user, within interval).
     assert len(calls) == 1
     assert pool.conn.ticks_written == []

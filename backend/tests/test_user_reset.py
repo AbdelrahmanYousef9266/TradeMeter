@@ -118,7 +118,7 @@ def test_purge_in_memory_state_evicts_only_target_user():
     tuple_registries = [_pipelines, _pipeline_locks, _engines,
                         ing._bar_state, ing._last_bar_time]
     # These stay keyed by the plain str(user_id).
-    str_registries = [ing._training_mode, ing._training_bar_count,
+    str_registries = [ing._system_mode, ing._training_bar_count,
                       ing._training_sessions]
 
     for reg in tuple_registries:

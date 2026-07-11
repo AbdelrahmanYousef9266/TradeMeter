@@ -31,6 +31,7 @@ from app.api.routes.predictions         import router as predictions_router
 from app.api.routes.models              import router as models_router
 from app.api.routes.champion_challenger import router as cc_router
 from app.api.routes.training            import router as training_router
+from app.api.routes.mode                import router as mode_router
 from app.api.routes.ingestion           import router as ingestion_router
 from app.api.routes.system              import router as system_router
 from app.api.routes.admin               import router as admin_router
@@ -100,10 +101,10 @@ async def nightly_lstm_training(app: FastAPI) -> None:
                         logger.info("Nightly LSTM result for %s: %s", user_id, result)
 
                         # Reload freshly-trained weights into the live 5-min pipeline.
-                        pipeline = _pipelines.get((user_id, LSTM_TIMEFRAME))
+                        pipeline = _pipelines.get((user_id, LSTM_TIMEFRAME, "live"))
                         if pipeline and pipeline.lstm is not None and result.get("success"):
                             row = await conn.fetchrow(
-                                "SELECT state FROM model_state WHERE user_id=$1 AND model_name='lstm' AND timeframe=$2",
+                                "SELECT state FROM model_state WHERE user_id=$1 AND model_name='lstm' AND timeframe=$2 AND context='live'",
                                 _uuid.UUID(user_id), LSTM_TIMEFRAME,
                             )
                             if row:
@@ -204,6 +205,7 @@ app.include_router(predictions_router,  prefix="/predictions", tags=["prediction
 app.include_router(models_router,       prefix="/models",      tags=["models"])
 app.include_router(cc_router,           prefix="/cc",          tags=["champion-challenger"])
 app.include_router(training_router,     prefix="/training",    tags=["training"])
+app.include_router(mode_router,         prefix="/mode",        tags=["mode"])
 app.include_router(ingestion_router,    prefix="/ingestion",   tags=["ingestion"])
 app.include_router(system_router,       prefix="/system",      tags=["system"])
 app.include_router(admin_router,         prefix="/admin",       tags=["admin"])

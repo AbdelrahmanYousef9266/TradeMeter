@@ -338,11 +338,13 @@ async def train_lstm(db_conn, user_id, epochs: int = 20,
     model.train_accuracy = val_acc
 
     # Persist into the shared model_state table under the 5-min timeframe (the
-    # LSTM's series), keyed by (user_id, 'lstm', '5min').
+    # LSTM's series) and the LIVE context. The LSTM is a batch-trained model with
+    # its own explicit train endpoint — it is trained directly to live and is
+    # orthogonal to the online-models' offline→live promotion flow.
     await db_conn.execute(
-        """INSERT INTO model_state (user_id, model_name, timeframe, state, bars_count, updated_at)
-           VALUES ($1, 'lstm', $2, $3, $4, NOW())
-           ON CONFLICT (user_id, model_name, timeframe)
+        """INSERT INTO model_state (user_id, model_name, timeframe, context, state, bars_count, updated_at)
+           VALUES ($1, 'lstm', $2, 'live', $3, $4, NOW())
+           ON CONFLICT (user_id, model_name, timeframe, context)
            DO UPDATE SET state      = EXCLUDED.state,
                          bars_count = EXCLUDED.bars_count,
                          updated_at = NOW()""",

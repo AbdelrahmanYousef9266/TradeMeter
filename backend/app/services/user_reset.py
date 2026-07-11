@@ -105,15 +105,17 @@ def purge_in_memory_state(user_id: str) -> None:
     for registry in (
         _pipelines, _pipeline_locks, _engines,
         ing._bar_state, ing._last_bar_time, ing._hist_save_accum,
+        ing._warmed_engines,
     ):
         for k in [k for k in registry if isinstance(k, tuple) and k[0] == user_id]:
-            registry.pop(k, None)
+            registry.discard(k) if isinstance(registry, set) else registry.pop(k, None)
 
     # These registries remain keyed by the canonical str(user_id); normalize here
     # too so a UUID caller can't leave an un-purged entry behind.
     for registry in (
-        ing._training_mode, ing._training_bar_count, ing._training_sessions,
-        ing._hist_reject_warn_at, ing._ingestion_armed, ing._disarm_log_at,
+        ing._system_mode, ing._training_bar_count, ing._training_sessions,
+        ing._hist_reject_warn_at, ing._mode_reject_at,
+        ing._ingestion_armed, ing._disarm_log_at,
     ):
         registry.pop(user_id, None)
     logger.info("Purged in-memory state for user %s", user_id)

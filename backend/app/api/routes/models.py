@@ -26,6 +26,10 @@ from app.services.ml.pipeline import (
 # both, tagged; per-model APIs default to the primary (5-min).
 MODEL_TIMEFRAMES = ["5min", "1min"]
 PRIMARY_TIMEFRAME = "5min"
+# The dashboard shows LIVE models by default; pass context=offline to inspect the
+# offline (history-trained) copy while a training run is in progress.
+VALID_CONTEXTS = ("live", "offline")
+DEFAULT_CONTEXT = "live"
 from app.services.ml.xp import (
     get_unlocked_settings,
     level_to_rank,
@@ -73,6 +77,7 @@ def _rank_gte(a: str, b: str) -> bool:
 
 @router.get("")
 async def list_models(
+    context: str = DEFAULT_CONTEXT,
     user: User = Depends(get_current_user),
     redis=Depends(get_redis),
     conn=Depends(get_db),
@@ -83,13 +88,15 @@ async def list_models(
     composite `id` ("momentum:5min") so the same model_name on two timeframes are
     distinct competitors. 5-min (primary) models are returned first.
 
+    Scoped to a *context* ("live" default, or "offline" to watch a training run).
     Queries model_levels directly — does not require the in-memory pipeline to be
     loaded. Returns null signal when no predictions exist yet (no bars received).
     """
+    context = _validate_context(context)
     try:
         rows = await conn.fetch(
-            "SELECT model_name, timeframe, level, xp, streak, bars_learned FROM model_levels WHERE user_id=$1",
-            user.id,
+            "SELECT model_name, timeframe, level, xp, streak, bars_learned FROM model_levels WHERE user_id=$1 AND context=$2",
+            user.id, context,
         )
         levels_map = {(r["timeframe"], r["model_name"]): dict(r) for r in rows}
     except Exception as exc:
@@ -120,6 +127,7 @@ async def list_models(
                 "id":        f"{name}:{tf}",
                 "name":      name,
                 "timeframe": tf,
+                "context":   context,
                 "primary":   tf == PRIMARY_TIMEFRAME,
                 "signal":    cached_by_tf.get(tf, {}).get(name),   # None until first bar
                 "level_info": {
@@ -140,20 +148,23 @@ async def list_models(
 
 @router.get("/leaderboard/levels")
 async def leaderboard_levels(
+    context: str = DEFAULT_CONTEXT,
     user: User = Depends(get_current_user),
     conn=Depends(get_db),
 ) -> list[dict]:
     """All 20 models (both timeframes) ranked by level DESC, then XP DESC."""
+    context = _validate_context(context)
     rows = []
     for tf in MODEL_TIMEFRAMES:
         try:
-            pipeline = await get_pipeline(str(user.id), conn, tf)
+            pipeline = await get_pipeline(str(user.id), conn, tf, context)
         except Exception as exc:
             logger.error("leaderboard_levels: get_pipeline failed for %s: %s", tf, exc)
             raise HTTPException(503, "Pipeline not available — try again after the first bar is received")
         for name in pipeline.model_names:
             t = pipeline.xp_trackers[name]
-            rows.append({"model_name": name, "timeframe": tf, "primary": tf == PRIMARY_TIMEFRAME,
+            rows.append({"model_name": name, "timeframe": tf, "context": context,
+                         "primary": tf == PRIMARY_TIMEFRAME,
                          "id": f"{name}:{tf}", "level": t.level, "xp": t.xp,
                          "rank": level_to_rank(t.level), "streak": t.streak})
     rows.sort(key=lambda r: (r["level"], r["xp"]), reverse=True)
@@ -164,13 +175,15 @@ async def leaderboard_levels(
 
 @router.get("/leaderboard")
 async def leaderboard_pnl(
+    context: str = DEFAULT_CONTEXT,
     user: User = Depends(get_current_user),
     conn=Depends(get_db),
 ) -> list[dict]:
     """All 20 models (both timeframes) ranked by today's simulated P&L."""
+    context = _validate_context(context)
     result = []
     for tf in MODEL_TIMEFRAMES:
-        pipeline = _pipelines.get((str(user.id), tf))
+        pipeline = _pipelines.get((str(user.id), tf, context))
         tm    = pipeline.trade_manager if pipeline else None
         names = pipeline.model_names if pipeline else model_names_for(tf)
         for name in names:
@@ -183,6 +196,7 @@ async def leaderboard_pnl(
             result.append({
                 "model_name":  name,
                 "timeframe":   tf,
+                "context":     context,
                 "primary":     tf == PRIMARY_TIMEFRAME,
                 "id":          f"{name}:{tf}",
                 "pnl_points":  round(stats["points"], 2),
@@ -222,11 +236,11 @@ async def train_lstm_endpoint(
     result = await train_lstm(conn, str(user.id))
 
     # Reload the freshly-trained weights into the live 5-min pipeline, if loaded
-    pipeline = _pipelines.get((str(user.id), LSTM_TIMEFRAME))
+    pipeline = _pipelines.get((str(user.id), LSTM_TIMEFRAME, "live"))
     if pipeline and pipeline.lstm is not None and result.get("success"):
         try:
             row = await conn.fetchrow(
-                "SELECT state FROM model_state WHERE user_id=$1 AND model_name='lstm' AND timeframe=$2",
+                "SELECT state FROM model_state WHERE user_id=$1 AND model_name='lstm' AND timeframe=$2 AND context='live'",
                 user.id, LSTM_TIMEFRAME,
             )
             if row:
@@ -255,7 +269,7 @@ async def lstm_status(
     # Live per-epoch training snapshot (empty when not currently training).
     prog = get_lstm_progress(str(user.id))
 
-    pipeline = _pipelines.get((str(user.id), LSTM_TIMEFRAME))
+    pipeline = _pipelines.get((str(user.id), LSTM_TIMEFRAME, "live"))
     is_trained = False
     last_trained = None
     train_accuracy = None
@@ -287,32 +301,170 @@ async def lstm_status(
     }
 
 
+# ── Promotion (offline → live) ────────────────────────────────────────────────
+# The ONLY path from offline (history-trained) weights to live trading. Nothing
+# is ever promoted automatically. Weights are copied; live LEVELS/XP are kept as
+# they are (the offline run's level ladder is a training artifact, not live
+# standing) — documented choice. The LSTM is excluded (it is batch-trained
+# directly to live via /models/lstm/train, orthogonal to this flow).
+
+
+def _zero_stats() -> dict:
+    return {"points": 0.0, "wins": 0, "losses": 0, "trades": 0}
+
+
+@router.get("/promotion-preview")
+async def promotion_preview(
+    timeframe: str = "all",
+    user: User = Depends(get_current_user),
+    conn       = Depends(get_db),
+) -> dict:
+    """
+    "Should I promote?" comparison: for each model, offline vs live bars_learned
+    (from model_levels) plus any in-memory simulated P&L/win-rate from the live
+    and offline pipelines. Cheap — reads what is already available.
+    """
+    tfs = MODEL_TIMEFRAMES if timeframe == "all" else [timeframe]
+
+    async def _levels(ctx: str, tf: str) -> dict:
+        rows = await conn.fetch(
+            "SELECT model_name, bars_learned, level FROM model_levels "
+            "WHERE user_id=$1 AND timeframe=$2 AND context=$3",
+            user.id, tf, ctx,
+        )
+        return {r["model_name"]: dict(r) for r in rows}
+
+    models = []
+    offline_exists = False
+    for tf in tfs:
+        live_lv = await _levels("live", tf)
+        off_lv  = await _levels("offline", tf)
+        if off_lv:
+            offline_exists = True
+        live_pl = _pipelines.get((str(user.id), tf, "live"))
+        off_pl  = _pipelines.get((str(user.id), tf, "offline"))
+        for name in model_names_for(tf):
+            live_s = (live_pl.trade_manager.get_session_stats(name) if live_pl else _zero_stats())
+            off_s  = (off_pl.trade_manager.get_session_stats(name)  if off_pl  else _zero_stats())
+            models.append({
+                "id":        f"{name}:{tf}",
+                "model_name": name,
+                "timeframe":  tf,
+                "offline_ready": name in off_lv or off_pl is not None,
+                "live": {
+                    "bars_learned": live_lv.get(name, {}).get("bars_learned", 0),
+                    "pnl_points":   round(live_s["points"], 2),
+                    "wins":         live_s["wins"],
+                    "losses":       live_s["losses"],
+                },
+                "offline": {
+                    "bars_learned": off_lv.get(name, {}).get("bars_learned", 0),
+                    "pnl_points":   round(off_s["points"], 2),
+                    "wins":         off_s["wins"],
+                    "losses":       off_s["losses"],
+                },
+            })
+    return {"timeframe": timeframe, "offline_exists": offline_exists, "models": models}
+
+
+@router.post("/promote")
+async def promote_offline_to_live(
+    body: dict,
+    user: User = Depends(get_current_user),
+    conn       = Depends(get_db),
+) -> dict:
+    """
+    Promote OFFLINE-trained weights to LIVE for a timeframe (or all).
+    Body: {"timeframe": "5min"|"1min"|"all", "confirm": "PROMOTE"}.
+
+    Copies the offline online-model weights into the live context, persists them,
+    and evicts the in-memory live pipeline so the new weights load on the next
+    bar. Live levels/XP are intentionally left untouched. The LSTM is excluded.
+    Nothing happens without confirm == "PROMOTE".
+    """
+    if body.get("confirm") != "PROMOTE":
+        raise HTTPException(400, 'Promotion requires {"confirm": "PROMOTE"}.')
+    timeframe = body.get("timeframe", "all")
+    if timeframe != "all" and timeframe not in MODEL_TIMEFRAMES:
+        raise HTTPException(400, f"Invalid timeframe '{timeframe}'. Use one of {MODEL_TIMEFRAMES} or 'all'.")
+    tfs = MODEL_TIMEFRAMES if timeframe == "all" else [timeframe]
+
+    from app.services.ml.pipeline import _pipelines, _pipeline_locks
+
+    promoted: dict[str, int] = {}
+    for tf in tfs:
+        # Flush the in-memory offline pipeline first so its latest learning is
+        # captured in model_state before we copy from it.
+        off_pl = _pipelines.get((str(user.id), tf, "offline"))
+        if off_pl is not None:
+            try:
+                await off_pl.save_state(conn)
+            except Exception as exc:
+                logger.warning("promote: offline snapshot failed for %s: %s", tf, exc)
+
+        tag = await conn.execute(
+            """INSERT INTO model_state (user_id, model_name, timeframe, context, state, bars_count, updated_at)
+               SELECT user_id, model_name, timeframe, 'live', state, bars_count, NOW()
+               FROM   model_state
+               WHERE  user_id = $1 AND timeframe = $2 AND context = 'offline'
+                 AND  model_name <> 'lstm'
+               ON CONFLICT (user_id, model_name, timeframe, context)
+               DO UPDATE SET state      = EXCLUDED.state,
+                             bars_count = EXCLUDED.bars_count,
+                             updated_at = NOW()""",
+            user.id, tf,
+        )
+        try:
+            promoted[tf] = int(tag.split()[-1])
+        except (ValueError, IndexError, AttributeError):
+            promoted[tf] = 0
+
+        # Evict the live pipeline so it reloads the promoted weights on next bar.
+        _pipelines.pop((str(user.id), tf, "live"), None)
+        _pipeline_locks.pop((str(user.id), tf, "live"), None)
+
+    total = sum(promoted.values())
+    if total == 0:
+        return {
+            "promoted": False,
+            "models_promoted": promoted,
+            "message": "No offline weights found to promote. Run an OFFLINE training import first.",
+        }
+    return {
+        "promoted": True,
+        "models_promoted": promoted,
+        "message": f"Promoted {total} offline model(s) to live. Live pipeline reloads on the next bar.",
+    }
+
+
 # ── Single model level ────────────────────────────────────────────────────────
 
 @router.get("/{model_name}/level")
 async def get_model_level(
     model_name: str,
     timeframe:  str = PRIMARY_TIMEFRAME,
+    context:    str = DEFAULT_CONTEXT,
     user: User  = Depends(get_current_user),
     conn        = Depends(get_db),
 ) -> dict:
     """
-    Current XP, level, streak, rank, unlocked settings for one model on *timeframe*.
-    Fast path: returns from in-memory pipeline if loaded.
-    Fallback: queries model_levels table directly; uses level-1 defaults on any error.
+    Current XP, level, streak, rank, unlocked settings for one model on
+    *timeframe*/*context*. Fast path: returns from in-memory pipeline if loaded.
+    Fallback: queries model_levels table directly; uses level-1 defaults on error.
     """
     _validate_model_name(model_name)
+    context = _validate_context(context)
 
     # Fast path — pipeline already in memory (bars have arrived)
-    pipeline = _pipelines.get((str(user.id), timeframe))
+    pipeline = _pipelines.get((str(user.id), timeframe, context))
     if pipeline and model_name in pipeline.xp_trackers:
         return pipeline.xp_trackers[model_name].to_dict()
 
     # Slow path — query DB directly (no need to initialise the whole pipeline)
     try:
         row = await conn.fetchrow(
-            "SELECT level, xp, streak, bars_learned FROM model_levels WHERE user_id=$1 AND model_name=$2 AND timeframe=$3",
-            user.id, model_name, timeframe,
+            "SELECT level, xp, streak, bars_learned FROM model_levels WHERE user_id=$1 AND model_name=$2 AND timeframe=$3 AND context=$4",
+            user.id, model_name, timeframe, context,
         )
     except Exception as exc:
         logger.warning("get_model_level: DB query failed for user %s: %s", user.id, exc)
@@ -334,22 +486,24 @@ async def get_model_level(
 async def get_settings(
     model_name: str,
     timeframe:  str = PRIMARY_TIMEFRAME,
+    context:    str = DEFAULT_CONTEXT,
     user: User  = Depends(get_current_user),
     conn        = Depends(get_db),
 ) -> dict:
     """
-    Return behavior settings for one model on *timeframe*, annotated with lock
-    status. Settings are per-timeframe (a 5-min Scalper can differ from a 1-min
-    Scalper). Uses in-memory pipeline settings if loaded; otherwise falls back to
-    hardcoded defaults. Never raises — new users always get a valid response.
+    Return behavior settings for one model on *timeframe*/*context*, annotated
+    with lock status. Settings are per-(timeframe, context). Uses in-memory
+    pipeline settings if loaded; otherwise falls back to hardcoded defaults.
+    Never raises — new users always get a valid response.
     """
     _validate_model_name(model_name)
+    context = _validate_context(context)
 
     # Determine rank (needed for lock annotations)
     raw  = None
     rank = "Rookie"
 
-    pipeline = _pipelines.get((str(user.id), timeframe))
+    pipeline = _pipelines.get((str(user.id), timeframe, context))
     if pipeline:
         rank = pipeline.level_ranks.get(model_name, "Rookie")
         try:
@@ -381,22 +535,24 @@ async def update_settings(
     model_name:   str,
     new_settings: dict,
     timeframe:    str = PRIMARY_TIMEFRAME,
+    context:      str = DEFAULT_CONTEXT,
     user: User    = Depends(get_current_user),
     conn          = Depends(get_db),
 ) -> dict:
     """
-    Update behavior settings for one model on *timeframe* (settings are
-    per-timeframe). Raises 403 if attempting to change a setting locked at the
-    model's current rank.
+    Update behavior settings for one model on *timeframe*/*context* (settings are
+    per-(timeframe, context)). Raises 403 if attempting to change a setting locked
+    at the model's current rank.
     """
     _validate_model_name(model_name)
+    context = _validate_context(context)
     if model_name == "lstm":
         raise HTTPException(
             400, "LSTM is batch-trained and has no tunable per-bar settings. "
                  "Use POST /models/lstm/train to retrain it.",
         )
     _validate_settings_values(new_settings)
-    pipeline = await get_pipeline(str(user.id), conn, timeframe)
+    pipeline = await get_pipeline(str(user.id), conn, timeframe, context)
     rank     = pipeline.level_ranks[model_name]
 
     for key in new_settings:
@@ -409,7 +565,8 @@ async def update_settings(
             )
 
     _get_model(pipeline, model_name).update_settings(new_settings)
-    return {"status": "updated", "model_name": model_name, "timeframe": timeframe, "settings": new_settings}
+    return {"status": "updated", "model_name": model_name, "timeframe": timeframe,
+            "context": context, "settings": new_settings}
 
 
 # ── Model reset ───────────────────────────────────────────────────────────────
@@ -418,22 +575,25 @@ async def update_settings(
 async def reset_model(
     model_name: str,
     timeframe:  str = PRIMARY_TIMEFRAME,
+    context:    str = DEFAULT_CONTEXT,
     user: User  = Depends(get_current_user),
     conn        = Depends(get_db),
 ) -> dict:
-    """Reset River model weights for one model on *timeframe*. Level/XP preserved."""
+    """Reset River model weights for one model on *timeframe*/*context*. Level/XP preserved."""
     _validate_model_name(model_name)
+    context = _validate_context(context)
     if model_name == "lstm":
         raise HTTPException(
             400, "LSTM is batch-trained — it has no online weights to reset. "
                  "Use POST /models/lstm/train to retrain it from history.",
         )
-    pipeline = await get_pipeline(str(user.id), conn, timeframe)
+    pipeline = await get_pipeline(str(user.id), conn, timeframe, context)
     _get_model(pipeline, model_name).reset()
     pipeline.drift_detectors[model_name].reset()
     return {
-        "message":   f"Model '{model_name}' ({timeframe}) weights reset. Level and XP preserved.",
+        "message":   f"Model '{model_name}' ({timeframe}/{context}) weights reset. Level and XP preserved.",
         "timeframe": timeframe,
+        "context":   context,
         "level":     pipeline.xp_trackers[model_name].level,
     }
 
@@ -444,14 +604,17 @@ async def reset_model(
 async def model_history(
     model_name: str,
     timeframe:  str      = PRIMARY_TIMEFRAME,
+    context:    str      = DEFAULT_CONTEXT,
     from_ts:    datetime = None,
     to_ts:      datetime = None,
     limit:      int      = 200,
     user: User  = Depends(get_current_user),
     conn        = Depends(get_db),
 ) -> list[dict]:
-    """Prediction history for one model on *timeframe* with actual outcomes."""
+    """Prediction history for one model on *timeframe*/*context* with outcomes.
+    Offline predictions are the is_training=true rows; live are is_training=false."""
     _validate_model_name(model_name)
+    context = _validate_context(context)
     if limit > 1000:
         raise HTTPException(400, "limit must be ≤ 1000")
 
@@ -465,11 +628,12 @@ async def model_history(
                WHERE  user_id    = $1
                  AND  model_name = $2
                  AND  timeframe  = $3
-                 AND  time      >= $4
-                 AND  time      <= $5
+                 AND  is_training = $4
+                 AND  time      >= $5
+                 AND  time      <= $6
                ORDER  BY time DESC
-               LIMIT  $6""",
-            user.id, model_name, timeframe, from_ts, to_ts, limit,
+               LIMIT  $7""",
+            user.id, model_name, timeframe, context == "offline", from_ts, to_ts, limit,
         )
     except Exception as exc:
         logger.error("model_history: DB query failed for user %s model %s: %s", user.id, model_name, exc)
@@ -533,6 +697,14 @@ def _validate_model_name(name: str) -> None:
             404,
             f"Unknown model '{name}'. Valid names: {ALL_MODEL_NAMES}",
         )
+
+
+def _validate_context(context: str) -> str:
+    if context not in VALID_CONTEXTS:
+        raise HTTPException(
+            400, f"Invalid context '{context}'. Must be one of: {list(VALID_CONTEXTS)}",
+        )
+    return context
 
 
 def _get_model(pipeline, name: str):

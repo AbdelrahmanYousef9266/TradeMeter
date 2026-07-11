@@ -75,15 +75,17 @@ class _Redis:
 
 @pytest.fixture(autouse=True)
 def _clean():
-    for d in (ingestion._last_bar_time, ingestion._bar_state, ingestion._training_mode,
-              ingestion._training_bar_count, ingestion._training_sessions):
+    for d in (ingestion._last_bar_time, ingestion._bar_state, ingestion._system_mode,
+              ingestion._training_bar_count, ingestion._training_sessions,
+              ingestion._warmed_engines, ingestion._mode_reject_at):
         d.clear()
     features._engines.clear()
     from app.services.ml.pipeline import _pipelines, _pipeline_locks
     _pipelines.pop(USER, None); _pipeline_locks.pop(USER, None)
     yield
-    for d in (ingestion._last_bar_time, ingestion._bar_state, ingestion._training_mode,
-              ingestion._training_bar_count, ingestion._training_sessions):
+    for d in (ingestion._last_bar_time, ingestion._bar_state, ingestion._system_mode,
+              ingestion._training_bar_count, ingestion._training_sessions,
+              ingestion._warmed_engines, ingestion._mode_reject_at):
         d.clear()
     features._engines.clear()
     _pipelines.pop(USER, None); _pipeline_locks.pop(USER, None)
@@ -101,9 +103,9 @@ async def test_watermark_is_timeframe_scoped():
     # Each dedups only within its own timeframe.
     assert await _accept_bar(USER, "1min", T0, pool) is False
     assert await _accept_bar(USER, "5min", T0, pool) is False
-    # Distinct watermark keys exist.
-    assert (USER, "1min") in ingestion._last_bar_time
-    assert (USER, "5min") in ingestion._last_bar_time
+    # Distinct watermark keys exist (per (user, timeframe, context)).
+    assert (USER, "1min", "live") in ingestion._last_bar_time
+    assert (USER, "5min", "live") in ingestion._last_bar_time
 
 
 # ── 2. Same-timestamp bars of different timeframes both persist (COPY) ───────

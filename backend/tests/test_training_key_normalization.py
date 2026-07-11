@@ -32,7 +32,7 @@ T = datetime(2026, 5, 1, 15, 0, tzinfo=timezone.utc)
 def _clean_state():
     regs = (
         ingestion._last_bar_time, ingestion._bar_state,
-        ingestion._training_mode, ingestion._training_bar_count,
+        ingestion._system_mode, ingestion._training_bar_count,
         ingestion._training_sessions, ingestion._hist_reject_warn_at,
     )
     for d in regs:
@@ -67,8 +67,8 @@ def test_stop_is_key_normalized_too():
 def test_registry_has_exactly_one_key_form():
     start_training(UID)
     # Only the canonical string key exists — no stray UUID-object key.
-    assert set(ingestion._training_mode.keys()) == {str(UID)}
-    assert all(isinstance(k, str) for k in ingestion._training_mode)
+    assert set(ingestion._system_mode.keys()) == {str(UID)}
+    assert all(isinstance(k, str) for k in ingestion._system_mode)
 
 
 # ── Integration: hist bar accepted across differing key forms end-to-end ─────

@@ -34,7 +34,7 @@ import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
 
 from app.models.tick import Tick
-from app.services.market_data.features import get_engine, get_et_time
+from app.services.market_data.features import get_engine, get_et_time, warm_start_engine
 from app.services.ml.pipeline import get_pipeline
 from app.core.redis import cache_latest_predictions
 
@@ -66,70 +66,154 @@ _hist_save_accum: dict[str, int] = {}
 _HIST_STATE_SAVE_EVERY = 5000
 
 
-# ── Training mode (per-user) ─────────────────────────────────────────────────
+# ── System MODE (per-user): LIVE or OFFLINE ──────────────────────────────────
 #
-# When a user turns training mode ON, they replay historical sessions through
-# the same NinjaTrader playback feed. The backend then:
-#   • bypasses the monotonic watermark so past/out-of-order bars are accepted,
-#   • never advances the live watermark (so live forward data resumes cleanly),
-#   • tags every stored tick/prediction is_training = true so it stays out of the
-#     live dataset and live-view queries.
-# In-memory, per-user, mirroring the other registries above.
-_training_mode:      dict[str, bool] = {}
-_training_bar_count: dict[str, int]  = {}
-_training_sessions:  dict[str, set]  = {}
+# The system is in exactly ONE mode at a time, per user:
+#
+#   LIVE (default)  — trades forward real-time data. Live bar closes flow into the
+#                     'live' context pipeline/engine; historical ("hist") bars are
+#                     REFUSED at the gate.
+#   OFFLINE         — trains on history. "hist" bars flow into the SEPARATE
+#                     'offline' context (a copy of the live models that learns
+#                     independently, tagged is_training=true, watermark bypassed);
+#                     live forward bars are REFUSED at the gate.
+#
+# This REPLACES the old "training mode is a flag on the live path" design: OFFLINE
+# mode is what training mode used to do (watermark bypass + is_training tagging),
+# but it now routes to its own models/feature-engine so historical learning can
+# never contaminate live. The offline→live merge is an explicit promotion only.
+#
+# In-memory, per-user, mirroring the other registries. The training counters below
+# are reused as the OFFLINE run's progress counters.
+MODE_LIVE    = "live"
+MODE_OFFLINE = "offline"
+
+_system_mode:        dict[str, str] = {}   # user_id -> "live" | "offline"
+_training_bar_count: dict[str, int] = {}   # offline run: bars ingested this run
+_training_sessions:  dict[str, set] = {}   # offline run: distinct ET session dates
 
 
-# All access to the training registries goes through these helpers, and each one
-# canonicalizes the key with str(user_id) as its first act. This is the single
-# source of truth for the key form: the API path passes str(user.id) and the
-# ingestion path passes str(tick.user_id) — both already canonical lowercase UUID
-# strings — but normalizing *inside* the accessor makes it impossible for any
-# caller (now or later) to set the flag under one key and read it under another
-# (e.g. a raw uuid.UUID vs its string form).
+# All access to the per-user registries goes through helpers that canonicalize the
+# key with str(user_id) as their first act. This is the single source of truth for
+# the key form: the API path passes str(user.id) and the ingestion path passes
+# str(tick.user_id) — both already canonical lowercase UUID strings — but
+# normalizing *inside* the accessor makes it impossible for any caller to set a
+# value under one key form and read it under another (str vs uuid.UUID).
 def _key(user_id) -> str:
     return str(user_id)
 
 
-def is_training_mode(user_id) -> bool:
-    return _training_mode.get(_key(user_id), False)
+def get_mode(user_id) -> str:
+    """Current system mode for the user. Default: LIVE."""
+    return _system_mode.get(_key(user_id), MODE_LIVE)
 
 
-def start_training(user_id) -> dict:
-    """Turn training mode ON and reset this-run counters."""
+def set_mode(user_id, mode: str) -> dict:
+    """
+    Set the system mode. Switching INTO offline resets this-run offline counters.
+    Callers (the /mode routes) are responsible for the queue-drain guard before
+    calling this — this function only flips the in-memory flag.
+    """
+    if mode not in (MODE_LIVE, MODE_OFFLINE):
+        raise ValueError(f"invalid mode {mode!r} (expected {MODE_LIVE!r} or {MODE_OFFLINE!r})")
     uid = _key(user_id)
-    _training_mode[uid]      = True
-    _training_bar_count[uid] = 0
-    _training_sessions[uid]  = set()
-    logger.info("Training mode ON for user %s", uid)
-    return training_status(uid)
+    _system_mode[uid] = mode
+    if mode == MODE_OFFLINE:
+        _training_bar_count[uid] = 0
+        _training_sessions[uid]  = set()
+    logger.info("System mode → %s for user %s", mode.upper(), uid)
+    return mode_status(uid)
 
 
-def stop_training(user_id) -> dict:
-    """Turn training mode OFF. Counters from the run are retained for the status read."""
-    uid = _key(user_id)
-    _training_mode[uid] = False
-    logger.info("Training mode OFF for user %s", uid)
-    return training_status(uid)
-
-
-def training_status(user_id) -> dict:
+def mode_status(user_id) -> dict:
     uid = _key(user_id)
     return {
-        "training":          _training_mode.get(uid, False),
+        "mode":              get_mode(uid),
         "bars_ingested":     _training_bar_count.get(uid, 0),
         "sessions_ingested": len(_training_sessions.get(uid, ())),
     }
 
 
+def context_for_mode(user_id) -> str:
+    """The model/engine context the current mode routes bars into."""
+    return "offline" if get_mode(user_id) == MODE_OFFLINE else "live"
+
+
+# ── Backward-compatible training aliases ─────────────────────────────────────
+# OFFLINE mode == the old "training mode". These keep the ingestion fast-path
+# routing, is_training tagging, and the /training/* endpoints working while the
+# mode switch is the real source of truth.
+def is_training_mode(user_id) -> bool:
+    """True iff the user is in OFFLINE mode (the old training-mode semantics)."""
+    return get_mode(user_id) == MODE_OFFLINE
+
+
+def start_training(user_id) -> dict:
+    """Alias: enter OFFLINE mode (reset this-run counters)."""
+    return set_mode(user_id, MODE_OFFLINE)
+
+
+def stop_training(user_id) -> dict:
+    """Alias: return to LIVE mode."""
+    return set_mode(user_id, MODE_LIVE)
+
+
+def training_status(user_id) -> dict:
+    """Legacy shape: {training, bars_ingested, sessions_ingested}."""
+    st = mode_status(user_id)
+    return {
+        "training":          st["mode"] == MODE_OFFLINE,
+        "bars_ingested":     st["bars_ingested"],
+        "sessions_ingested": st["sessions_ingested"],
+    }
+
+
 def _note_training_bar(user_id, bar_time) -> None:
-    """Advance this-run training counters for one replayed bar (key-normalized)."""
+    """Advance the OFFLINE run's counters for one imported bar (key-normalized)."""
     uid = _key(user_id)
     _training_bar_count[uid] = _training_bar_count.get(uid, 0) + 1
     try:
         _training_sessions.setdefault(uid, set()).add(get_et_time(bar_time).date())
     except Exception:
         pass
+
+
+# ── Mode-enforcement gate (per-user) ─────────────────────────────────────────
+#
+# Exactly one KIND of bar is accepted per mode: LIVE accepts live bar closes and
+# refuses "hist"; OFFLINE accepts "hist" and refuses live. A refused bar never
+# enters any pipeline. Refusals are logged at most once per user per interval so a
+# wrong-mode strategy blasting bars can't flood the log.
+_mode_reject_at: dict[str, float] = {}
+_MODE_REJECT_INTERVAL = 30.0   # seconds between refusal logs per user
+
+
+def _is_hist_bar(bar_type: str) -> bool:
+    return (bar_type or "").lower() == "hist"
+
+
+def bar_allowed_in_mode(user_id, bar_type: str) -> bool:
+    """
+    True if a bar of this type may enter under the user's current mode.
+    LIVE → live (non-hist) bars only; OFFLINE → hist bars only. Ticks are handled
+    upstream and are not mode-gated here.
+    """
+    hist = _is_hist_bar(bar_type)
+    return not hist if get_mode(user_id) == MODE_LIVE else hist
+
+
+def _warn_mode_reject(user_id: str, bar_type: str) -> None:
+    now  = time.monotonic()
+    last = _mode_reject_at.get(user_id, 0.0)
+    if now - last >= _MODE_REJECT_INTERVAL:
+        _mode_reject_at[user_id] = now
+        mode = get_mode(user_id)
+        kind = "historical" if _is_hist_bar(bar_type) else "live"
+        logger.info(
+            "Ingestion: %s bar refused for user %s — system is in %s mode "
+            "(switch modes from the dashboard to accept it)",
+            kind, user_id, mode.upper(),
+        )
 
 
 # ── Ingestion arm gate (per-user) ────────────────────────────────────────────
@@ -297,23 +381,29 @@ async def flush_queue(user_id: str, redis_client: aioredis.Redis) -> int:
 
 # ── Idempotency / monotonic-order guard (per timeframe) ──────────────────────
 
-def _wm_key(user_id: str, timeframe: str) -> tuple[str, str]:
-    """Watermark key — one high-water mark per (user, timeframe) series."""
-    return (user_id, timeframe)
+def _wm_key(user_id: str, timeframe: str, context: str = "live") -> tuple[str, str, str]:
+    """Watermark key — one high-water mark per (user, timeframe, context) series.
+
+    Only the live context enforces a monotonic watermark (offline replays history
+    out of order by design), but the key carries context so the two never share a
+    mark."""
+    return (user_id, timeframe, context)
 
 
-async def _accept_bar(user_id: str, timeframe: str, tick_time, db_pool: asyncpg.Pool) -> bool:
+async def _accept_bar(user_id: str, timeframe: str, tick_time, db_pool: asyncpg.Pool,
+                      context: str = "live") -> bool:
     """
-    Decide whether this bar close should be processed. The high-water mark is
-    per (user_id, timeframe): a 1-min and a 5-min series each have their own
-    watermark, so a 5-min bar never dedups against a 1-min bar at the same time.
+    Decide whether this LIVE bar close should be processed. The high-water mark is
+    per (user_id, timeframe, context): a 1-min and a 5-min series each have their
+    own watermark, so a 5-min bar never dedups against a 1-min bar at the same
+    time.
 
     Returns False (skip) when the bar is a duplicate or arrives out of order for
-    ITS timeframe — i.e. its timestamp is not strictly newer than the last one we
-    processed for that timeframe. Seeded once from MAX(time) for the (user,
-    timeframe) live rows so it holds across a restart.
+    ITS series — i.e. its timestamp is not strictly newer than the last one we
+    processed. Seeded once from MAX(time) for the (user, timeframe) live rows so
+    it holds across a restart.
     """
-    key = _wm_key(user_id, timeframe)
+    key = _wm_key(user_id, timeframe, context)
     if key not in _last_bar_time:
         watermark = None
         try:
@@ -421,6 +511,62 @@ async def _store_predictions(
             logger.error("Failed to store prediction for %s: %s", model_name, exc)
 
 
+# ── Warm-start ───────────────────────────────────────────────────────────────
+#
+# A FeatureEngine keeps only in-memory rolling indicator state, so a fresh engine
+# (first bar after a backend restart) needs 50 bars before it produces features —
+# meaning ~50 live bars of blindness (hours on a 5-min series). Warm-start replays
+# the most recent STORED bars for the (user, timeframe, context) through the
+# engine so it exits warmup on the very first real bar. This is FEATURES ONLY — no
+# model is touched, nothing is learned; it only primes EMA/RSI/ATR/VWAP/MACD.
+_warmed_engines: set = set()
+_WARMUP_LOAD_BARS = 60   # a little over the 50-bar warmup so the next bar is live
+
+
+async def _maybe_warm_start(user_id, timeframe, context, db_pool, before_time=None) -> None:
+    """Prime a fresh engine once from stored bars (see module note). Idempotent
+    per (user, timeframe, context); a no-op if the engine already has state."""
+    key = (str(user_id), timeframe, context)
+    if key in _warmed_engines:
+        return
+    _warmed_engines.add(key)   # mark first so a failure never re-attempts every bar
+
+    engine = get_engine(user_id, timeframe, context)
+    if engine.bar_count > 0:
+        return   # already primed (not a fresh engine)
+
+    is_training = context == "offline"
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT time, symbol, open, high, low, close, volume, bar_type, timeframe
+                   FROM ticks
+                   WHERE user_id = $1 AND timeframe = $2 AND is_training = $3
+                     AND bar_type <> 'tick' AND ($4::timestamptz IS NULL OR time < $4)
+                   ORDER BY time DESC
+                   LIMIT $5""",
+                _uuid.UUID(str(user_id)), timeframe, is_training, before_time, _WARMUP_LOAD_BARS,
+            )
+    except Exception as exc:
+        logger.warning("Ingestion: warm-start load failed for %s/%s/%s: %s", user_id, timeframe, context, exc)
+        return
+
+    bars = [
+        Tick(
+            time=r["time"], user_id=_uuid.UUID(str(user_id)), symbol=r["symbol"],
+            open=r["open"], high=r["high"], low=r["low"], close=r["close"],
+            volume=r["volume"], bar_type=r["bar_type"], timeframe=r["timeframe"],
+        )
+        for r in reversed(rows)   # oldest → newest
+    ]
+    fed = warm_start_engine(engine, bars)
+    if fed:
+        logger.info(
+            "Ingestion: warm-started %s/%s/%s engine with %d stored bars (features only)",
+            user_id, timeframe, context, fed,
+        )
+
+
 # ── Entry processor ─────────────────────────────────────────────────────────
 
 async def _process_entry(
@@ -448,27 +594,30 @@ async def _process_entry(
     # ────────────────────────────────────────────────────────────────────────
 
     user_id = str(tick.user_id)
-    training = is_training_mode(user_id)
 
-    # ── 2a. HISTORICAL-IMPORT GATE — "hist" bars require training mode ────
-    # Bulk-imported historical bars (bar_type "hist") are a bar close like any
-    # other and flow through the full ML/storage path, but only when the user
-    # has training mode ON. Rejecting them otherwise keeps accidental imports
-    # out of the live dataset and away from the live watermark.
-    if tick.bar_type.lower() == "hist" and not training:
-        _warn_hist_rejected(user_id)
+    # ── 2a. MODE GATE — exactly one KIND of bar is accepted per mode ──────
+    # LIVE accepts live bar closes and refuses "hist"; OFFLINE accepts "hist" and
+    # refuses live. A wrong-kind bar is refused here and never enters any pipeline
+    # or storage. (OFFLINE "hist" bars normally take the fast bulk path in
+    # _route_entries and never reach here; this gate is the authoritative backstop
+    # and the place a LIVE-mode hist bar or an OFFLINE-mode live bar is dropped.)
+    if not bar_allowed_in_mode(user_id, tick.bar_type):
+        _warn_mode_reject(user_id, tick.bar_type)
         return
+
+    training = is_training_mode(user_id)           # True ⇒ OFFLINE mode
+    context  = context_for_mode(user_id)           # "offline" | "live"
 
     # ── 2b. IDEMPOTENCY GATE — skip duplicate / out-of-order bars ─────────
     # Must run before any stateful work (feature engine, DB writes, learning)
     # so a redelivered bar can't double-mutate state or insert duplicate rows.
     #
-    # TRAINING MODE bypasses this entirely: replaying history means bars are
+    # OFFLINE mode bypasses this entirely: replaying history means bars are
     # deliberately in the past / out of order. We also never call _accept_bar
     # here (it advances the live watermark) so live forward data resumes cleanly
-    # once training stops.
+    # once the user returns to LIVE mode.
     if not training:
-        if not await _accept_bar(user_id, tick.timeframe, tick.time, db_pool):
+        if not await _accept_bar(user_id, tick.timeframe, tick.time, db_pool, context):
             logger.debug(
                 "Ingestion: skipping duplicate/stale %s bar %s for user %s",
                 tick.timeframe, tick.time, user_id,
@@ -494,16 +643,21 @@ async def _process_entry(
         # Non-fatal — ML pipeline and WebSocket publish still run
         logger.error("Ingestion: DB write failed (continuing to ML): %s", exc)
 
-    # ── 3b. FEATURES/ML PER TIMEFRAME ─────────────────────────────────────
-    # Every timeframe now runs the full features/learning/prediction path on its
-    # OWN engine and pipeline (Phase 2). The 1-min and 5-min series are fully
-    # independent — separate rolling indicator state, separate models. lstm runs
-    # on the 5-min pipeline only.
+    # ── 3b. FEATURES/ML PER (TIMEFRAME, CONTEXT) ──────────────────────────
+    # Every (timeframe, context) runs the full features/learning/prediction path
+    # on its OWN engine and pipeline. 1-min vs 5-min and live vs offline are all
+    # fully independent — separate rolling indicator state, separate models. lstm
+    # runs on the 5-min pipeline only. In practice this per-bar path handles LIVE
+    # bars (offline bars take the fast bulk path), so context is "live" here.
     tf = tick.timeframe
-    bs_key = (user_id, tf)
+    bs_key = (user_id, tf, context)
+
+    # Warm-start the fresh engine from recent stored bars so it exits the 50-bar
+    # warmup immediately after a restart (features only — no model learning).
+    await _maybe_warm_start(user_id, tf, context, db_pool, before_time=tick.time)
 
     # ── 4. Compute features ───────────────────────────────────────────────
-    engine = get_engine(user_id, tf)
+    engine = get_engine(user_id, tf, context)
     try:
         features = engine.update(tick)
     except Exception as exc:
@@ -521,6 +675,7 @@ async def _process_entry(
                 "time": tick.time.isoformat(),
                 "bar":  _bar,
                 "timeframe": tf,
+                "context": context,
                 "training": training,
                 "warmup": {
                     "bars_received": engine.bar_count,
@@ -532,12 +687,12 @@ async def _process_entry(
             logger.error("Ingestion: Redis warmup publish failed: %s", exc)
         return
 
-    # ── 5. Get or create the per-(user, timeframe) ML pipeline ───────────
+    # ── 5. Get or create the per-(user, timeframe, context) ML pipeline ──
     try:
         async with db_pool.acquire() as conn:
-            pipeline = await get_pipeline(user_id, conn, tf)
+            pipeline = await get_pipeline(user_id, conn, tf, context)
     except Exception as exc:
-        logger.error("Ingestion: get_pipeline failed for user %s/%s: %s", user_id, tf, exc)
+        logger.error("Ingestion: get_pipeline failed for user %s/%s/%s: %s", user_id, tf, context, exc)
         return
 
     # ── 6. Learn from previous bar (Level 3 — trade outcome based) ───────
@@ -611,6 +766,7 @@ async def _process_entry(
             "time":        tick.time.isoformat(),
             "bar":         _bar,
             "timeframe":   tf,          # which series this bar/models belong to
+            "context":     context,     # "live" | "offline" — which model set
             "features":    features,
             "models":      pred_cache,
             "levels":      levels_dict,
@@ -742,19 +898,23 @@ async def _process_hist_batch(
     pending = await get_queue_pending(redis_client)
     users_seen: set[str] = set()
 
+    # Bulk-imported "hist" bars are OFFLINE training data by definition — they
+    # learn on the SEPARATE offline engine + pipeline (a copy of live that never
+    # mutates live), tagged is_training=true above.
+    context = "offline"
     for (user_id, tf), ticks in by_series.items():
         users_seen.add(user_id)
 
-        # 3. In-memory learning on this timeframe's engine + pipeline.
-        engine = get_engine(user_id, tf)
+        # 3. In-memory learning on this timeframe's OFFLINE engine + pipeline.
+        engine = get_engine(user_id, tf, context)
         try:
             async with db_pool.acquire() as conn:
-                pipeline = await get_pipeline(user_id, conn, tf)
+                pipeline = await get_pipeline(user_id, conn, tf, context)
         except Exception as exc:
-            logger.error("Ingestion(fast): get_pipeline failed for %s/%s: %s", user_id, tf, exc)
+            logger.error("Ingestion(fast): get_pipeline failed for %s/%s/%s: %s", user_id, tf, context, exc)
             continue
 
-        bs_key = (user_id, tf)
+        bs_key = (user_id, tf, context)
         for tick in ticks:
             try:
                 features = engine.update(tick)

@@ -267,22 +267,48 @@ class FeatureEngine:
 
 # ── Global registry ────────────────────────────────────────────────────────
 #
-# Keyed by (str(user_id), timeframe): each timeframe is an INDEPENDENT series
-# with its own rolling indicator state (EMA/RSI/ATR/VWAP/MACD, session/VWAP
-# resets). A 1-min bar updates only the 1-min engine and a 5-min bar only the
-# 5-min engine — they never share or contaminate state.
+# Keyed by (str(user_id), timeframe, context): each timeframe is an INDEPENDENT
+# series with its own rolling indicator state (EMA/RSI/ATR/VWAP/MACD, session/
+# VWAP resets), AND each context ('live' | 'offline') has its OWN engine. This is
+# the real feature-isolation guarantee of the ONLINE/OFFLINE split: the live
+# engine only ever sees live bars and the offline engine only ever sees
+# historical bars, so a training run can never leave the live indicators seeded
+# with historical state. A 1-min live bar updates only the (user, 1min, live)
+# engine — nothing else.
 
-_engines: dict[tuple[str, str], FeatureEngine] = {}
+_engines: dict[tuple[str, str, str], FeatureEngine] = {}
 
 
-def get_engine(user_id, timeframe: str = "5min") -> FeatureEngine:
-    """Return the FeatureEngine for this (user, timeframe), creating one lazily.
+def get_engine(user_id, timeframe: str = "5min", context: str = "live") -> FeatureEngine:
+    """Return the FeatureEngine for this (user, timeframe, context), creating one
+    lazily.
 
-    Keyed by the canonical (str(user_id), timeframe) so a str and a uuid.UUID for
-    the same user never map to two different engines, and so 1-min and 5-min keep
-    fully separate indicator state.
+    Keyed by the canonical (str(user_id), timeframe, context) so a str and a
+    uuid.UUID for the same user never map to two different engines, and so 1-min
+    vs 5-min and live vs offline all keep fully separate indicator state.
     """
-    key = (str(user_id), timeframe)
+    key = (str(user_id), timeframe, context)
     if key not in _engines:
         _engines[key] = FeatureEngine()
     return _engines[key]
+
+
+def warm_start_engine(engine: "FeatureEngine", bars: list) -> int:
+    """
+    Feed a chronological list of prior bars through the engine to prime its
+    rolling indicator state — WARM-START ONLY, not learning. No model is touched;
+    this only advances the FeatureEngine's EMA/RSI/ATR/VWAP/MACD state (and its
+    bar_count) so a freshly created engine exits the 50-bar warmup immediately
+    instead of being blind for the first ~50 live bars after a restart.
+
+    `bars` must be Tick-like objects ordered oldest→newest. Returns the number of
+    bars fed. Safe to call once on a fresh engine (bar_count == 0).
+    """
+    fed = 0
+    for bar in bars:
+        try:
+            engine.update(bar)
+            fed += 1
+        except Exception:
+            continue
+    return fed

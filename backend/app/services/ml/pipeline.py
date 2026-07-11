@@ -85,9 +85,15 @@ class MLPipeline:
     weights, XP, trades, and persistence. The default timeframe is the primary
     trading timeframe (5-min), which carries the full model set including lstm."""
 
-    def __init__(self, user_id: str, initial_levels: dict, timeframe: str = "5min") -> None:
+    def __init__(self, user_id: str, initial_levels: dict, timeframe: str = "5min",
+                 context: str = "live") -> None:
         self.user_id = user_id
         self.timeframe = timeframe
+        # context ∈ {"live","offline"}. 'live' serves live trading and learns only
+        # from live bars; 'offline' is an independent COPY trained on history that
+        # never mutates live and is merged in only via explicit promotion. All
+        # persistence below is scoped by this context so the two never collide.
+        self.context = context
         self.model_names = model_names_for(timeframe)
         self._has_lstm = "lstm" in self.model_names
 
@@ -484,16 +490,16 @@ class MLPipeline:
         for name, tracker in self.xp_trackers.items():
             await db_conn.execute(
                 """INSERT INTO model_levels
-                       (user_id, model_name, timeframe, level, xp, streak, bars_learned, updated_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-                   ON CONFLICT (user_id, model_name, timeframe)
+                       (user_id, model_name, timeframe, context, level, xp, streak, bars_learned, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                   ON CONFLICT (user_id, model_name, timeframe, context)
                    DO UPDATE SET
                        level        = EXCLUDED.level,
                        xp           = EXCLUDED.xp,
                        streak       = EXCLUDED.streak,
                        bars_learned = EXCLUDED.bars_learned,
                        updated_at   = EXCLUDED.updated_at""",
-                uid, name, self.timeframe,
+                uid, name, self.timeframe, self.context,
                 tracker.level, tracker.xp, tracker.streak, tracker.bars_learned,
             )
 
@@ -509,7 +515,8 @@ class MLPipeline:
                    WHERE user_id    = $6
                      AND model_name = $7
                      AND time       = $8
-                     AND timeframe  = $9""",
+                     AND timeframe  = $9
+                     AND is_training = $10""",
                 "win" if trade.won else "loss",
                 trade.pnl_points,
                 trade.pnl_dollars,
@@ -519,6 +526,7 @@ class MLPipeline:
                 trade.model_name,
                 trade.entry_time,
                 self.timeframe,
+                self.context == "offline",
             )
         except Exception as exc:
             logger.warning("_save_trade failed (non-fatal): %s", exc)
@@ -564,13 +572,13 @@ class MLPipeline:
                 continue
             try:
                 await db_conn.execute(
-                    """INSERT INTO model_state (user_id, model_name, timeframe, state, bars_count, updated_at)
-                       VALUES ($1, $2, $3, $4, $5, NOW())
-                       ON CONFLICT (user_id, model_name, timeframe)
+                    """INSERT INTO model_state (user_id, model_name, timeframe, context, state, bars_count, updated_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                       ON CONFLICT (user_id, model_name, timeframe, context)
                        DO UPDATE SET state      = EXCLUDED.state,
                                      bars_count = EXCLUDED.bars_count,
                                      updated_at = EXCLUDED.updated_at""",
-                    uid, name, self.timeframe, blob, self.bar_count,
+                    uid, name, self.timeframe, self.context, blob, self.bar_count,
                 )
             except Exception as exc:
                 logger.warning("save_state: DB write failed for %s/%s: %s", self.user_id, name, exc)
@@ -617,26 +625,40 @@ class MLPipeline:
             logger.warning("MLflow snapshot failed (non-fatal): %s", exc)
 
 
-# ── Global per-(user, timeframe) registry ───────────────────────────────────
+# ── Global per-(user, timeframe, context) registry ──────────────────────────
 
-_pipelines: dict[tuple[str, str], MLPipeline] = {}
-_pipeline_locks: dict[tuple[str, str], asyncio.Lock] = {}
+_pipelines: dict[tuple[str, str, str], MLPipeline] = {}
+_pipeline_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
 
 
-async def get_pipeline(user_id, db_conn: asyncpg.Connection, timeframe: str = "5min") -> MLPipeline:
-    # Canonical key: (str(user_id), timeframe). The DB queries below re-parse the
-    # user_id with _uuid.UUID(user_id), which accepts the string form, so both a
-    # str and a uuid.UUID caller resolve to the same pipeline. Each timeframe is
-    # an independent pipeline with its own persisted state.
+async def _load_state_blobs(
+    db_conn: asyncpg.Connection, user_id: str, timeframe: str, context: str
+) -> dict[str, bytes]:
+    """model_state blobs for one (user, timeframe, context), as {model_name: bytes}."""
+    rows = await db_conn.fetch(
+        "SELECT model_name, state FROM model_state "
+        "WHERE user_id = $1 AND timeframe = $2 AND context = $3",
+        _uuid.UUID(user_id), timeframe, context,
+    )
+    return {r["model_name"]: r["state"] for r in rows or []}
+
+
+async def get_pipeline(
+    user_id, db_conn: asyncpg.Connection, timeframe: str = "5min", context: str = "live"
+) -> MLPipeline:
+    # Canonical key: (str(user_id), timeframe, context). Each (timeframe, context)
+    # is a fully independent pipeline with its own persisted weights + levels. The
+    # 'offline' context is a COPY of 'live' seeded on first creation and NEVER
+    # mutates live thereafter.
     user_id = str(user_id)
-    key = (user_id, timeframe)
+    key = (user_id, timeframe, context)
 
     # Fast path — no lock needed for reads once the pipeline exists
     if key in _pipelines:
         return _pipelines[key]
 
-    # Ensure a per-(user, timeframe) lock exists (synchronous, atomic in asyncio —
-    # no await between the check and the assignment so no race on lock creation)
+    # Ensure a per-key lock exists (synchronous, atomic in asyncio — no await
+    # between the check and the assignment so no race on lock creation)
     if key not in _pipeline_locks:
         _pipeline_locks[key] = asyncio.Lock()
 
@@ -650,8 +672,8 @@ async def get_pipeline(user_id, db_conn: asyncpg.Connection, timeframe: str = "5
             rows = await db_conn.fetch(
                 """SELECT model_name, level, xp, streak, bars_learned
                    FROM   model_levels
-                   WHERE  user_id = $1 AND timeframe = $2""",
-                _uuid.UUID(user_id), timeframe,
+                   WHERE  user_id = $1 AND timeframe = $2 AND context = $3""",
+                _uuid.UUID(user_id), timeframe, context,
             )
             initial_levels = {
                 r["model_name"]: {
@@ -663,46 +685,61 @@ async def get_pipeline(user_id, db_conn: asyncpg.Connection, timeframe: str = "5
                 for r in rows
             }
         except Exception as exc:
-            logger.warning("get_pipeline: could not load model levels for %s/%s (%s) — using defaults", user_id, timeframe, exc)
+            logger.warning("get_pipeline: could not load model levels for %s/%s/%s (%s) — using defaults", user_id, timeframe, context, exc)
             initial_levels = {}
 
-        pipeline = MLPipeline(user_id, initial_levels, timeframe=timeframe)
+        pipeline = MLPipeline(user_id, initial_levels, timeframe=timeframe, context=context)
 
         # Restore persisted River weights so learning survives restarts, scoped to
-        # THIS timeframe. Falls back to fresh models on any load/unpickle failure.
-        # The 'lstm' row uses a different (PyTorch) format and is loaded separately
-        # below, so it is excluded from restore_state here.
+        # THIS (timeframe, context). Falls back to fresh models on any failure. The
+        # 'lstm' row uses a different (PyTorch) format and is loaded separately.
         try:
-            state_rows = await db_conn.fetch(
-                "SELECT model_name, state FROM model_state WHERE user_id = $1 AND timeframe = $2",
-                _uuid.UUID(user_id), timeframe,
-            )
-            saved = {r["model_name"]: r["state"] for r in state_rows or []}
+            saved = await _load_state_blobs(db_conn, user_id, timeframe, context)
+
+            # Offline seed: the first time an offline pipeline is created it has no
+            # weights of its own. Deep-copy the CURRENT live weights so it starts
+            # exactly where live is, then diverges as it learns from history. To
+            # capture live's latest in-memory learning (not just the last periodic
+            # save), flush the in-memory live pipeline first, then read its blobs.
+            if context == "offline" and not saved:
+                live_key = (user_id, timeframe, "live")
+                live_pl = _pipelines.get(live_key)
+                if live_pl is not None:
+                    try:
+                        await live_pl.save_state(db_conn)
+                    except Exception as exc:
+                        logger.warning("get_pipeline: live snapshot before offline seed failed for %s/%s (%s)", user_id, timeframe, exc)
+                saved = await _load_state_blobs(db_conn, user_id, timeframe, "live")
+                if saved:
+                    logger.info(
+                        "get_pipeline: seeding offline models for %s/%s from %d live weight blob(s)",
+                        user_id, timeframe, len(saved),
+                    )
 
             lstm_blob = saved.pop("lstm", None)
 
             if saved:
                 n = pipeline.restore_state(saved)
                 logger.info(
-                    "get_pipeline: restored %d/%d River model states for user %s/%s",
-                    n, len(saved), user_id, timeframe,
+                    "get_pipeline: restored %d/%d River model states for user %s/%s/%s",
+                    n, len(saved), user_id, timeframe, context,
                 )
 
             if lstm_blob is not None and pipeline.lstm is not None:
                 try:
                     pipeline.lstm.load(lstm_blob)
-                    logger.info("get_pipeline: restored trained LSTM for user %s/%s", user_id, timeframe)
+                    logger.info("get_pipeline: restored trained LSTM for user %s/%s/%s", user_id, timeframe, context)
                 except Exception as exc:
                     logger.warning(
-                        "get_pipeline: LSTM load failed for %s/%s (%s) — staying untrained",
-                        user_id, timeframe, exc,
+                        "get_pipeline: LSTM load failed for %s/%s/%s (%s) — staying untrained",
+                        user_id, timeframe, context, exc,
                     )
         except Exception as exc:
             logger.warning(
-                "get_pipeline: model_state load failed for %s/%s (%s) — using fresh models",
-                user_id, timeframe, exc,
+                "get_pipeline: model_state load failed for %s/%s/%s (%s) — using fresh models",
+                user_id, timeframe, context, exc,
             )
 
         _pipelines[key] = pipeline
-        logger.info("ML pipeline created for user %s/%s", user_id, timeframe)
+        logger.info("ML pipeline created for user %s/%s/%s", user_id, timeframe, context)
         return pipeline
